@@ -2,12 +2,15 @@
 ; Input: two numbers a and b
 ; Output: a + b
 
-.entry main
+.section .text
+.global _start
 
-main:
-    READ r1         ; r1 = a (first input)
-    READ r2         ; r2 = b (second input)
-    ADD r3, r1, r2  ; r3 = a + b
-    WRITE r3        ; output result
-    COMMIT r3       ; commit as public output
-    HALT
+_start:
+    read    a0              ; a0 = first input
+    read    a1              ; a1 = second input
+    add     rv, a0, a1      ; rv = a0 + a1
+    write   rv              ; output result
+    halt
+
+.section .data
+; No data needed
