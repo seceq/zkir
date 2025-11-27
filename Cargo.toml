@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "spec",
+    "zkir-spec",
     # "assembler",
     # "disassembler",
     # "cli",
@@ -16,7 +16,7 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 # Internal crates
-zkir-spec = { path = "spec" }
+zkir-spec = { path = "zkir-spec" }
 # zkir-assembler = { path = "assembler" }
 # zkir-disassembler = { path = "disassembler" }
 
