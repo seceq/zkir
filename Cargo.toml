@@ -2,8 +2,9 @@
 resolver = "2"
 members = [
     "zkir-spec",
-    # "assembler",
-    # "disassembler",
+    "zkir-runtime",
+    "zkir-assembler",
+    "zkir-disassembler",
     # "cli",
 ]
 
@@ -17,8 +18,9 @@ rust-version = "1.75"
 [workspace.dependencies]
 # Internal crates
 zkir-spec = { path = "zkir-spec" }
-# zkir-assembler = { path = "assembler" }
-# zkir-disassembler = { path = "disassembler" }
+zkir-runtime = { path = "zkir-runtime" }
+zkir-assembler = { path = "zkir-assembler" }
+zkir-disassembler = { path = "zkir-disassembler" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

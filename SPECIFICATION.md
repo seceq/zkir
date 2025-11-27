@@ -1,525 +1,509 @@
-# ZK IR Specification v0.1.0
+# ZK IR Specification
 
-## Project Overview
+## Overview
 
-**ZK IR** (Zero-Knowledge Intermediate Representation) is a bytecode format designed specifically for efficient zero-knowledge proof generation. It serves as the target for compilation from LLVM IR and executes on a custom zkVM runtime.
+ZK IR is a 32-bit register-based instruction set designed for zero-knowledge proof generation using Plonky3 with the Baby Bear field.
 
-### Goals
-
-1. **ZK-Friendly**: Minimal constraints per instruction
-2. **LLVM Compatible**: Easy translation from LLVM IR
-3. **Simple**: Small instruction set (~30-40 instructions)
-4. **Deterministic**: Same inputs always produce same execution
-5. **Provable**: Every execution can generate a valid proof
-
-### Non-Goals
-
-1. Not a general-purpose VM (no I/O, syscalls, threads)
-2. Not hardware-optimized (no registers for CPU performance)
-3. Not backward-compatible with any existing ISA
+**Key Design Decisions:**
+- 32-bit registers only (no field registers)
+- Baby Bear field (p = 2^31 - 2^27 + 1)
+- RISC-V inspired 32-bit instruction encoding
+- Syscalls for cryptographic operations
+- Register pairs for 64-bit values (software convention)
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         ZK IR VM                                │
+│                    ZK IR Architecture                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │ Program     │  │ Memory      │  │ Registers               │ │
-│  │ Counter     │  │             │  │                         │ │
-│  │ (PC)        │  │ 2^32 cells  │  │ r0-r31 (general)        │ │
-│  │             │  │ (field      │  │ f0-f15 (field elements) │ │
-│  │ 32-bit      │  │  elements)  │  │                         │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
+│  Integer Registers (32 × 32-bit):                              │
+│  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───────────┐ │
+│  │  r0 │  r1 │  r2 │  r3 │ r4  │ r5  │ r6  │ r7  │ r8-r31    │ │
+│  │ =0  │  rv │  sp │  fp │ a0  │ a1  │ a2  │ a3  │ temp/saved│ │
+│  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───────────┘ │
 │                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ Call Stack                                               │   │
-│  │ (return addresses, frame pointers)                       │   │
-│  └─────────────────────────────────────────────────────────┘   │
+│  NO field registers (use syscalls for crypto)                  │
 │                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ I/O Buffers                                              │   │
-│  │ - Input buffer (read-only)                               │   │
-│  │ - Output buffer (write-only)                             │   │
-│  └─────────────────────────────────────────────────────────┘   │
+│  Special Registers:                                            │
+│  ┌─────────────┐                                               │
+│  │     PC      │  Program counter (32-bit)                     │
+│  └─────────────┘                                               │
+│                                                                 │
+│  Memory: 32-bit addressable, 32-bit words, little-endian       │
+│  Proving Field: Baby Bear (p = 2^31 - 2^27 + 1)                │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Field Element
+## Design Rationale: No Field Registers
 
-All computation operates over a prime field.
+Field registers were removed after analysis showed they hurt performance:
 
-### Primary Field: BabyBear
+| Factor | With Field Regs | Without | Winner |
+|--------|----------------|---------|--------|
+| Trace columns | 32 + 32 = 64 | 32 | Without |
+| Constraints/cycle | ~96 | ~48 | Without |
+| Implementation | Complex | Simple | Without |
+| Flexibility | Fixed | Syscalls | Without |
+
+**Register pairs handle 64/128-bit arithmetic efficiently. Syscalls handle crypto.**
+
+---
+
+## Field Specification
+
+### Baby Bear Prime
 
 ```
-Field: BabyBear
-Prime: p = 2^31 - 2^27 + 1 = 2013265921
-Size: 31 bits
+p = 2^31 - 2^27 + 1 = 2013265921 = 0x78000001
 
 Properties:
-- Fast modular arithmetic
-- Efficient for STARKs
-- Used by Plonky3 and SP1
+- 31-bit prime
+- Fits in u32 with room for lazy reduction
+- 2-adicity: 27 (excellent for FFT)
+- Plonky3's native field
 ```
 
-### Alternative: Goldilocks (for 64-bit operations)
+### Rust Type
 
-```
-Field: Goldilocks  
-Prime: p = 2^64 - 2^32 + 1
-Size: 64 bits
+```rust
+/// Baby Bear field element
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BabyBear(pub u32);
 
-Use when:
-- 64-bit integer operations needed
-- Higher precision required
+impl BabyBear {
+    pub const MODULUS: u32 = 2013265921;
+    pub const ZERO: Self = BabyBear(0);
+    pub const ONE: Self = BabyBear(1);
+}
 ```
 
 ---
 
-## Register Set
+## Register Specification
 
-### General Purpose Registers (r0-r31)
+### Integer Registers (32 × 32-bit)
+
+| Register | Alias | Purpose | Saver |
+|----------|-------|---------|-------|
+| r0 | zero | Hardwired zero | - |
+| r1 | rv | Return value | Caller |
+| r2 | sp | Stack pointer | Callee |
+| r3 | fp | Frame pointer | Callee |
+| r4 | a0 | Argument 0 / Return low | Caller |
+| r5 | a1 | Argument 1 / Return high | Caller |
+| r6 | a2 | Argument 2 | Caller |
+| r7 | a3 | Argument 3 | Caller |
+| r8-r15 | t0-t7 | Temporaries | Caller |
+| r16-r23 | s0-s7 | Saved registers | Callee |
+| r24-r27 | t8-t11 | More temporaries | Caller |
+| r28 | gp | Global pointer | - |
+| r29 | tp | Thread pointer | - |
+| r30 | ra | Return address | Caller |
+| r31 | - | Reserved | - |
+
+### Rust Definition
+
+```rust
+pub const NUM_REGISTERS: usize = 32;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Register {
+    R0 = 0,   // zero - hardwired to 0
+    R1 = 1,   // rv   - return value
+    R2 = 2,   // sp   - stack pointer
+    R3 = 3,   // fp   - frame pointer
+    R4 = 4,   // a0   - argument 0
+    R5 = 5,   // a1   - argument 1
+    R6 = 6,   // a2   - argument 2
+    R7 = 7,   // a3   - argument 3
+    R8 = 8,   // t0
+    R9 = 9,   // t1
+    R10 = 10, // t2
+    R11 = 11, // t3
+    R12 = 12, // t4
+    R13 = 13, // t5
+    R14 = 14, // t6
+    R15 = 15, // t7
+    R16 = 16, // s0
+    R17 = 17, // s1
+    R18 = 18, // s2
+    R19 = 19, // s3
+    R20 = 20, // s4
+    R21 = 21, // s5
+    R22 = 22, // s6
+    R23 = 23, // s7
+    R24 = 24, // t8
+    R25 = 25, // t9
+    R26 = 26, // t10
+    R27 = 27, // t11
+    R28 = 28, // gp
+    R29 = 29, // tp
+    R30 = 30, // ra
+    R31 = 31, // reserved
+}
+
+impl Register {
+    pub const ZERO: Self = Self::R0;
+    pub const RV: Self = Self::R1;
+    pub const SP: Self = Self::R2;
+    pub const FP: Self = Self::R3;
+    pub const A0: Self = Self::R4;
+    pub const A1: Self = Self::R5;
+    pub const A2: Self = Self::R6;
+    pub const A3: Self = Self::R7;
+    pub const RA: Self = Self::R30;
+}
+```
+
+---
+
+## Multi-Word Value Conventions
+
+### 64-bit Values (Register Pairs)
 
 ```
-r0:  Zero register (always 0, writes ignored)
-r1:  Return value / Accumulator
-r2:  Stack pointer (SP)
-r3:  Frame pointer (FP)
-r4-r7:   Function arguments
-r8-r15:  Caller-saved temporaries
-r16-r23: Callee-saved
-r24-r31: Reserved / Temporaries
+Convention: Use consecutive even-odd register pairs
+  - Low 32 bits:  rN     (even register)
+  - High 32 bits: rN+1   (odd register)
+
+Standard pairs:
+  (a0, a1) = (r4, r5)   - Argument/return
+  (a2, a3) = (r6, r7)   - Argument
+  (t0, t1) = (r8, r9)   - Temporary
+  (t2, t3) = (r10, r11) - Temporary
+  (s0, s1) = (r16, r17) - Saved
 ```
 
-### Field Registers (f0-f15)
+### 128-bit Values (Register Quads)
 
 ```
-f0-f15: 256-bit field elements for cryptographic operations
-        Used for native field arithmetic, hashing, etc.
+Convention: Four consecutive registers
+  - Bits 0-31:   rN
+  - Bits 32-63:  rN+1
+  - Bits 64-95:  rN+2
+  - Bits 96-127: rN+3
+
+Standard quads:
+  (a0, a1, a2, a3) = (r4, r5, r6, r7)
+  (t0, t1, t2, t3) = (r8, r9, r10, r11)
 ```
 
-### Special Registers
+### Example: 64-bit Addition
+
+```asm
+; Add 64-bit values: result = a + b
+; Input:  a in (r4, r5), b in (r6, r7)
+; Output: result in (r4, r5)
+
+add   r4, r4, r6        ; low = a_lo + b_lo
+sltu  t0, r4, r6        ; t0 = carry (1 if overflow)
+add   r5, r5, r7        ; high = a_hi + b_hi
+add   r5, r5, t0        ; high += carry
+
+; Cost: 4 instructions, ~12 constraints
+; Much better than 64-bit registers (which add 64 columns to trace)
+```
+
+### Example: 64-bit Comparison (a < b unsigned)
+
+```asm
+; Compare 64-bit: result = (a < b) ? 1 : 0
+; Input:  a in (r4, r5), b in (r6, r7)
+; Output: t0 = result
+
+sltu  t0, r5, r7        ; t0 = (a_hi < b_hi)
+xor   t1, r5, r7        ; t1 = (a_hi == b_hi) ? 0 : non-zero
+sltiu t1, t1, 1         ; t1 = (a_hi == b_hi) ? 1 : 0
+sltu  t2, r4, r6        ; t2 = (a_lo < b_lo)
+and   t2, t2, t1        ; t2 = equal_hi && lo_less
+or    t0, t0, t2        ; result = hi_less || (equal_hi && lo_less)
+```
+
+---
+
+## Instruction Encoding (32-bit, RISC-V Compatible)
+
+### Formats
 
 ```
-PC:  Program counter (32-bit)
+R-type (register-register):
+┌─────────┬───────┬───────┬────────┬───────┬─────────┐
+│ funct7  │  rs2  │  rs1  │ funct3 │   rd  │ opcode  │
+│  7 bits │ 5 bits│ 5 bits│ 3 bits │ 5 bits│ 7 bits  │
+└─────────┴───────┴───────┴────────┴───────┴─────────┘
+ 31     25 24   20 19   15 14    12 11    7 6       0
+
+I-type (immediate):
+┌──────────────────┬───────┬────────┬───────┬─────────┐
+│     imm[11:0]    │  rs1  │ funct3 │   rd  │ opcode  │
+│     12 bits      │ 5 bits│ 3 bits │ 5 bits│ 7 bits  │
+└──────────────────┴───────┴────────┴───────┴─────────┘
+ 31              20 19   15 14    12 11    7 6       0
+
+S-type (store):
+┌─────────┬───────┬───────┬────────┬─────────┬─────────┐
+│imm[11:5]│  rs2  │  rs1  │ funct3 │imm[4:0] │ opcode  │
+│  7 bits │ 5 bits│ 5 bits│ 3 bits │ 5 bits  │ 7 bits  │
+└─────────┴───────┴───────┴────────┴─────────┴─────────┘
+ 31     25 24   20 19   15 14    12 11      7 6       0
+
+B-type (branch):
+┌───┬────────┬───────┬───────┬────────┬────────┬───┬─────────┐
+│[12]│[10:5] │  rs2  │  rs1  │ funct3 │ [4:1]  │[11]│ opcode  │
+│1 b │ 6 bits│ 5 bits│ 5 bits│ 3 bits │ 4 bits │1 b │ 7 bits  │
+└───┴────────┴───────┴───────┴────────┴────────┴───┴─────────┘
+ 31  30    25 24   20 19   15 14    12 11     8  7  6       0
+
+U-type (upper immediate):
+┌────────────────────────────┬───────┬─────────┐
+│        imm[31:12]          │   rd  │ opcode  │
+│         20 bits            │ 5 bits│ 7 bits  │
+└────────────────────────────┴───────┴─────────┘
+ 31                        12 11    7 6       0
+
+J-type (jump):
+┌───┬──────────┬───┬──────────┬───────┬─────────┐
+│[20]│ [10:1]  │[11]│ [19:12]  │   rd  │ opcode  │
+│1 b │ 10 bits │1 b │  8 bits  │ 5 bits│ 7 bits  │
+└───┴──────────┴───┴──────────┴───────┴─────────┘
+ 31  30      21  20  19      12 11    7 6       0
+```
+
+### Opcode Map
+
+```
+[6:0] Primary Opcode:
+
+0x03  LOAD      (I-type)  LW, LH, LB, LHU, LBU
+0x13  OP-IMM    (I-type)  ADDI, SLTI, XORI, ORI, ANDI, SLLI, SRLI, SRAI
+0x17  AUIPC     (U-type)  Add upper immediate to PC
+0x23  STORE     (S-type)  SW, SH, SB
+0x33  OP        (R-type)  ADD, SUB, MUL, DIV, AND, OR, XOR, SLL, SRL, SRA, SLT
+0x37  LUI       (U-type)  Load upper immediate
+0x63  BRANCH    (B-type)  BEQ, BNE, BLT, BGE, BLTU, BGEU
+0x67  JALR      (I-type)  Jump and link register
+0x6F  JAL       (J-type)  Jump and link
+0x73  SYSTEM    (I-type)  ECALL, EBREAK
+
+0x0B  ZK-CUSTOM (R-type)  ASSERT, COMMIT, RANGE_CHECK
+0x5B  ZK-IO     (I-type)  READ, WRITE, HINT
 ```
 
 ---
 
 ## Instruction Set
 
-### Instruction Encoding
+### Arithmetic (R-type: opcode = 0x33)
 
-```
-Fixed 64-bit instruction format:
+| Instruction | funct7 | funct3 | Description |
+|-------------|--------|--------|-------------|
+| ADD rd, rs1, rs2 | 0x00 | 0x0 | rd = rs1 + rs2 |
+| SUB rd, rs1, rs2 | 0x20 | 0x0 | rd = rs1 - rs2 |
+| MUL rd, rs1, rs2 | 0x01 | 0x0 | rd = (rs1 × rs2)[31:0] |
+| MULH rd, rs1, rs2 | 0x01 | 0x1 | rd = (rs1 × rs2)[63:32] (signed) |
+| MULHU rd, rs1, rs2 | 0x01 | 0x3 | rd = (rs1 × rs2)[63:32] (unsigned) |
+| DIV rd, rs1, rs2 | 0x01 | 0x4 | rd = rs1 / rs2 (signed) |
+| DIVU rd, rs1, rs2 | 0x01 | 0x5 | rd = rs1 / rs2 (unsigned) |
+| REM rd, rs1, rs2 | 0x01 | 0x6 | rd = rs1 % rs2 (signed) |
+| REMU rd, rs1, rs2 | 0x01 | 0x7 | rd = rs1 % rs2 (unsigned) |
 
-┌────────┬────────┬────────┬────────┬────────────────────────────┐
-│ Opcode │  Dst   │  Src1  │  Src2  │       Immediate            │
-│ 8 bits │ 8 bits │ 8 bits │ 8 bits │        32 bits             │
-└────────┴────────┴────────┴────────┴────────────────────────────┘
+### Arithmetic Immediate (I-type: opcode = 0x13)
 
-Alternative formats:
+| Instruction | funct3 | Description |
+|-------------|--------|-------------|
+| ADDI rd, rs1, imm | 0x0 | rd = rs1 + sext(imm) |
+| SLTI rd, rs1, imm | 0x2 | rd = (rs1 < sext(imm)) ? 1 : 0 |
+| SLTIU rd, rs1, imm | 0x3 | rd = (rs1 <u sext(imm)) ? 1 : 0 |
+| XORI rd, rs1, imm | 0x4 | rd = rs1 ^ sext(imm) |
+| ORI rd, rs1, imm | 0x6 | rd = rs1 \| sext(imm) |
+| ANDI rd, rs1, imm | 0x7 | rd = rs1 & sext(imm) |
+| SLLI rd, rs1, shamt | 0x1 | rd = rs1 << shamt |
+| SRLI rd, rs1, shamt | 0x5 | rd = rs1 >> shamt (logical) |
+| SRAI rd, rs1, shamt | 0x5 | rd = rs1 >> shamt (arithmetic) |
 
-Format R (Register):     opcode | dst | src1 | src2 | unused
-Format I (Immediate):    opcode | dst | src1 | immediate (32-bit)
-Format J (Jump):         opcode | unused | target (48-bit)
-Format M (Memory):       opcode | dst | base | offset (32-bit)
-```
+### Logic (R-type: opcode = 0x33)
 
-### Opcode Table
+| Instruction | funct7 | funct3 | Description |
+|-------------|--------|--------|-------------|
+| AND rd, rs1, rs2 | 0x00 | 0x7 | rd = rs1 & rs2 |
+| OR rd, rs1, rs2 | 0x00 | 0x6 | rd = rs1 \| rs2 |
+| XOR rd, rs1, rs2 | 0x00 | 0x4 | rd = rs1 ^ rs2 |
+| SLL rd, rs1, rs2 | 0x00 | 0x1 | rd = rs1 << (rs2 & 0x1F) |
+| SRL rd, rs1, rs2 | 0x00 | 0x5 | rd = rs1 >> (rs2 & 0x1F) |
+| SRA rd, rs1, rs2 | 0x20 | 0x5 | rd = rs1 >>a (rs2 & 0x1F) |
+| SLT rd, rs1, rs2 | 0x00 | 0x2 | rd = (rs1 < rs2) ? 1 : 0 |
+| SLTU rd, rs1, rs2 | 0x00 | 0x3 | rd = (rs1 <u rs2) ? 1 : 0 |
 
-```
-Category        | Opcode | Mnemonic    | Description
-----------------|--------|-------------|----------------------------------
-Arithmetic      | 0x01   | ADD         | dst = src1 + src2
-                | 0x02   | SUB         | dst = src1 - src2
-                | 0x03   | MUL         | dst = src1 * src2
-                | 0x04   | DIV         | dst = src1 / src2 (unsigned)
-                | 0x05   | SDIV        | dst = src1 / src2 (signed)
-                | 0x06   | MOD         | dst = src1 % src2 (unsigned)
-                | 0x07   | SMOD        | dst = src1 % src2 (signed)
-                | 0x08   | NEG         | dst = -src1
-                
-Immediate Arith | 0x10   | ADDI        | dst = src1 + imm
-                | 0x11   | SUBI        | dst = src1 - imm
-                | 0x12   | MULI        | dst = src1 * imm
-                
-Logic           | 0x20   | AND         | dst = src1 & src2
-                | 0x21   | OR          | dst = src1 | src2
-                | 0x22   | XOR         | dst = src1 ^ src2
-                | 0x23   | NOT         | dst = ~src1
-                | 0x24   | SHL         | dst = src1 << src2
-                | 0x25   | SHR         | dst = src1 >> src2 (logical)
-                | 0x26   | SAR         | dst = src1 >> src2 (arithmetic)
-                
-Comparison      | 0x30   | EQ          | dst = (src1 == src2) ? 1 : 0
-                | 0x31   | NE          | dst = (src1 != src2) ? 1 : 0
-                | 0x32   | LT          | dst = (src1 < src2) ? 1 : 0 (signed)
-                | 0x33   | LE          | dst = (src1 <= src2) ? 1 : 0 (signed)
-                | 0x34   | GT          | dst = (src1 > src2) ? 1 : 0 (signed)
-                | 0x35   | GE          | dst = (src1 >= src2) ? 1 : 0 (signed)
-                | 0x36   | LTU         | dst = (src1 < src2) ? 1 : 0 (unsigned)
-                | 0x37   | GEU         | dst = (src1 >= src2) ? 1 : 0 (unsigned)
-                
-Memory          | 0x40   | LOAD        | dst = memory[src1 + offset]
-                | 0x41   | STORE       | memory[dst + offset] = src1
-                | 0x42   | LOAD8       | dst = memory[src1 + offset] & 0xFF
-                | 0x43   | LOAD16      | dst = memory[src1 + offset] & 0xFFFF
-                | 0x44   | STORE8      | memory[dst + offset] = src1 & 0xFF
-                | 0x45   | STORE16     | memory[dst + offset] = src1 & 0xFFFF
-                
-Control Flow    | 0x50   | JMP         | pc = target
-                | 0x51   | JMPI        | pc = src1 (indirect jump)
-                | 0x52   | BEQ         | if (src1 == src2) pc = target
-                | 0x53   | BNE         | if (src1 != src2) pc = target
-                | 0x54   | BLT         | if (src1 < src2) pc = target (signed)
-                | 0x55   | BGE         | if (src1 >= src2) pc = target (signed)
-                | 0x56   | BLTU        | if (src1 < src2) pc = target (unsigned)
-                | 0x57   | BGEU        | if (src1 >= src2) pc = target (unsigned)
-                
-Functions       | 0x60   | CALL        | push pc+1, pc = target
-                | 0x61   | CALLI       | push pc+1, pc = src1 (indirect)
-                | 0x62   | RET         | pc = pop()
-                
-Constants       | 0x70   | LI          | dst = immediate (32-bit)
-                | 0x71   | LUI         | dst = immediate << 32
-                | 0x72   | MOV         | dst = src1
-                
-Field Ops       | 0x80   | FADD        | fdst = fsrc1 + fsrc2 (field)
-                | 0x81   | FSUB        | fdst = fsrc1 - fsrc2 (field)
-                | 0x82   | FMUL        | fdst = fsrc1 * fsrc2 (field)
-                | 0x83   | FINV        | fdst = fsrc1^(-1) (field inverse)
-                | 0x84   | FNEG        | fdst = -fsrc1 (field)
-                
-ZK Primitives   | 0x90   | HASH        | fdst = poseidon(fsrc1, fsrc2)
-                | 0x91   | HASH4       | fdst = poseidon(fsrc1..fsrc4)
-                | 0x92   | ASSERT_EQ   | assert(src1 == src2)
-                | 0x93   | ASSERT_ZERO | assert(src1 == 0)
-                | 0x94   | RANGE_CHECK | assert(src1 < 2^imm)
-                
-I/O             | 0xA0   | READ        | dst = read_input()
-                | 0xA1   | WRITE       | write_output(src1)
-                | 0xA2   | COMMIT      | commit_public(src1)
-                
-System          | 0xF0   | NOP         | no operation
-                | 0xF1   | HALT        | stop execution
-                | 0xFF   | INVALID     | invalid instruction (trap)
-```
+### Load (I-type: opcode = 0x03)
+
+| Instruction | funct3 | Description |
+|-------------|--------|-------------|
+| LW rd, imm(rs1) | 0x2 | rd = mem[rs1 + sext(imm)] |
+| LH rd, imm(rs1) | 0x1 | rd = sext(mem16[rs1 + sext(imm)]) |
+| LHU rd, imm(rs1) | 0x5 | rd = zext(mem16[rs1 + sext(imm)]) |
+| LB rd, imm(rs1) | 0x0 | rd = sext(mem8[rs1 + sext(imm)]) |
+| LBU rd, imm(rs1) | 0x4 | rd = zext(mem8[rs1 + sext(imm)]) |
+
+### Store (S-type: opcode = 0x23)
+
+| Instruction | funct3 | Description |
+|-------------|--------|-------------|
+| SW rs2, imm(rs1) | 0x2 | mem[rs1 + sext(imm)] = rs2 |
+| SH rs2, imm(rs1) | 0x1 | mem16[rs1 + sext(imm)] = rs2[15:0] |
+| SB rs2, imm(rs1) | 0x0 | mem8[rs1 + sext(imm)] = rs2[7:0] |
+
+### Branch (B-type: opcode = 0x63)
+
+| Instruction | funct3 | Description |
+|-------------|--------|-------------|
+| BEQ rs1, rs2, imm | 0x0 | if (rs1 == rs2) PC += sext(imm) |
+| BNE rs1, rs2, imm | 0x1 | if (rs1 != rs2) PC += sext(imm) |
+| BLT rs1, rs2, imm | 0x4 | if (rs1 < rs2) PC += sext(imm) |
+| BGE rs1, rs2, imm | 0x5 | if (rs1 >= rs2) PC += sext(imm) |
+| BLTU rs1, rs2, imm | 0x6 | if (rs1 <u rs2) PC += sext(imm) |
+| BGEU rs1, rs2, imm | 0x7 | if (rs1 >=u rs2) PC += sext(imm) |
+
+### Jump
+
+| Instruction | Opcode | Type | Description |
+|-------------|--------|------|-------------|
+| JAL rd, imm | 0x6F | J | rd = PC+4; PC += sext(imm) |
+| JALR rd, rs1, imm | 0x67 | I | rd = PC+4; PC = (rs1+sext(imm)) & ~1 |
+
+### Upper Immediate
+
+| Instruction | Opcode | Type | Description |
+|-------------|--------|------|-------------|
+| LUI rd, imm | 0x37 | U | rd = imm << 12 |
+| AUIPC rd, imm | 0x17 | U | rd = PC + (imm << 12) |
+
+### System (opcode = 0x73)
+
+| Instruction | imm | Description |
+|-------------|-----|-------------|
+| ECALL | 0x000 | System call (see syscall table) |
+| EBREAK | 0x001 | Breakpoint |
+
+### ZK-Custom (opcode = 0x0B)
+
+| Instruction | funct7 | funct3 | Description |
+|-------------|--------|--------|-------------|
+| ASSERT_EQ rs1, rs2 | 0x00 | 0x0 | Assert rs1 == rs2, halt if false |
+| ASSERT_NE rs1, rs2 | 0x00 | 0x1 | Assert rs1 != rs2 |
+| ASSERT_ZERO rs1 | 0x01 | 0x0 | Assert rs1 == 0 |
+| RANGE_CHECK rs1, bits | 0x02 | 0x0 | Assert rs1 < 2^bits |
+| COMMIT rs1 | 0x10 | 0x0 | Add rs1 to public commitments |
+| HALT | 0x7F | 0x7 | Halt execution successfully |
+
+### ZK I/O (opcode = 0x5B)
+
+| Instruction | funct3 | Description |
+|-------------|--------|-------------|
+| READ rd | 0x0 | rd = next public input |
+| WRITE rs1 | 0x1 | Output rs1 to public outputs |
+| HINT rd | 0x2 | rd = next private hint (non-deterministic) |
 
 ---
 
-## Instruction Details
+## Syscalls (ECALL)
 
-### Arithmetic Instructions
+Syscalls provide cryptographic operations via dedicated prover chips.
 
-#### ADD - Addition
-
-```
-Syntax:  ADD dst, src1, src2
-Opcode:  0x01
-Operation: dst = (src1 + src2) mod p
-Flags:   None
-Cycles:  1
-
-Constraints (for proving):
-  - dst_next = src1_current + src2_current
-```
-
-#### MUL - Multiplication
+### Calling Convention
 
 ```
-Syntax:  MUL dst, src1, src2  
-Opcode:  0x03
-Operation: dst = (src1 * src2) mod p
-Flags:   None
-Cycles:  1
-
-Constraints:
-  - dst_next = src1_current * src2_current
+a7 (r7):  Syscall number
+a0-a5:    Arguments (pointers, lengths, etc.)
+a0:       Return value (0 = success, non-zero = error)
 ```
 
-#### DIV - Division
+### Syscall Table
+
+| Number | Name | Description |
+|--------|------|-------------|
+| 0x01 | SYS_POSEIDON2 | Poseidon2 hash |
+| 0x02 | SYS_KECCAK256 | Keccak-256 hash |
+| 0x03 | SYS_SHA256 | SHA-256 hash |
+| 0x04 | SYS_BLAKE3 | BLAKE3 hash |
+| 0x10 | SYS_ECDSA_VERIFY | ECDSA signature verify |
+| 0x11 | SYS_ED25519_VERIFY | Ed25519 signature verify |
+| 0x20 | SYS_BIGINT_ADD | 256-bit addition |
+| 0x21 | SYS_BIGINT_MUL | 256-bit multiplication |
+| 0x22 | SYS_BIGINT_MOD | 256-bit modular reduction |
+
+### Syscall Details
+
+#### SYS_POSEIDON2 (0x01)
 
 ```
-Syntax:  DIV dst, src1, src2
-Opcode:  0x04
-Operation: dst = src1 / src2 (unsigned, truncated)
-Flags:   None
-Cycles:  1
+Hash using Poseidon2 over Baby Bear field.
 
-Constraints:
-  - src1 = dst * src2 + remainder
-  - remainder < src2
-  - (src2 == 0) => TRAP
+Input:
+  a0: pointer to input (array of u32, field elements)
+  a1: input length (number of field elements)
+  a2: pointer to output (8 u32s = 256 bits)
+
+Output:
+  a0: 0 on success
+
+Example:
+  li    a7, 0x01          ; SYS_POSEIDON2
+  la    a0, input_data    ; input pointer
+  li    a1, 8             ; 8 field elements
+  la    a2, output_hash   ; output pointer
+  ecall
 ```
 
-### Memory Instructions
-
-#### LOAD - Load from Memory
+#### SYS_SHA256 (0x03)
 
 ```
-Syntax:  LOAD dst, offset(base)
-Opcode:  0x40
-Operation: dst = memory[base + offset]
-Encoding: opcode | dst | base | offset (32-bit)
+SHA-256 hash.
 
-Constraints:
-  - address = base + offset
-  - dst = memory_read(address)
-  - Memory consistency check via permutation argument
+Input:
+  a0: pointer to input data (bytes)
+  a1: input length in bytes
+  a2: pointer to output (32 bytes)
+
+Output:
+  a0: 0 on success
+
+Example:
+  li    a7, 0x03          ; SYS_SHA256
+  la    a0, message       ; message pointer
+  li    a1, 64            ; 64 bytes
+  la    a2, hash_out      ; output pointer
+  ecall
 ```
 
-#### STORE - Store to Memory
+#### SYS_ECDSA_VERIFY (0x10)
 
 ```
-Syntax:  STORE offset(base), src
-Opcode:  0x41  
-Operation: memory[base + offset] = src
-Encoding: opcode | src | base | offset (32-bit)
+Verify ECDSA signature on secp256k1.
 
-Constraints:
-  - address = base + offset
-  - memory_write(address, src)
-  - Memory consistency check via permutation argument
-```
+Input:
+  a0: pointer to message hash (32 bytes)
+  a1: pointer to signature (64 bytes: r || s)
+  a2: pointer to public key (64 bytes: x || y)
 
-### Control Flow Instructions
+Output:
+  a0: 0 if valid, 1 if invalid
 
-#### JMP - Unconditional Jump
-
-```
-Syntax:  JMP target
-Opcode:  0x50
-Operation: pc = target
-Encoding: opcode | unused | target (48-bit)
-
-Constraints:
-  - pc_next = target
-```
-
-#### BEQ - Branch if Equal
-
-```
-Syntax:  BEQ src1, src2, target
-Opcode:  0x52
-Operation: if (src1 == src2) pc = target else pc = pc + 1
-
-Constraints:
-  - eq = (src1 == src2) ? 1 : 0
-  - pc_next = eq * target + (1 - eq) * (pc + 1)
-```
-
-#### CALL - Function Call
-
-```
-Syntax:  CALL target
-Opcode:  0x60
-Operation:
-  - push(pc + 1)  ; Save return address
-  - pc = target
-
-Constraints:
-  - stack[sp] = pc + 1
-  - sp_next = sp + 1
-  - pc_next = target
-```
-
-#### RET - Return from Function
-
-```
-Syntax:  RET
-Opcode:  0x62
-Operation:
-  - pc = pop()  ; Restore return address
-
-Constraints:
-  - sp_next = sp - 1
-  - pc_next = stack[sp - 1]
-```
-
-### Field Operations
-
-#### FADD - Field Addition
-
-```
-Syntax:  FADD fdst, fsrc1, fsrc2
-Opcode:  0x80
-Operation: fdst = (fsrc1 + fsrc2) mod p
-
-Native field operation - single constraint.
-```
-
-#### FMUL - Field Multiplication
-
-```
-Syntax:  FMUL fdst, fsrc1, fsrc2
-Opcode:  0x81
-Operation: fdst = (fsrc1 * fsrc2) mod p
-
-Native field operation - single constraint.
-```
-
-#### FINV - Field Inverse
-
-```
-Syntax:  FINV fdst, fsrc1
-Opcode:  0x83
-Operation: fdst = fsrc1^(-1) mod p
-
-Constraints:
-  - fdst * fsrc1 = 1 (mod p)
-```
-
-### ZK Primitive Instructions
-
-#### HASH - Poseidon Hash
-
-```
-Syntax:  HASH fdst, fsrc1, fsrc2
-Opcode:  0x90
-Operation: fdst = Poseidon(fsrc1, fsrc2)
-
-Uses built-in Poseidon permutation.
-Optimized circuit - ~200 constraints.
-```
-
-#### ASSERT_EQ - Assert Equality
-
-```
-Syntax:  ASSERT_EQ src1, src2
-Opcode:  0x92
-Operation: if (src1 != src2) TRAP
-
-Constraints:
-  - src1 = src2
-  
-Note: Failure means no valid proof can be generated.
-```
-
-#### RANGE_CHECK - Range Check
-
-```
-Syntax:  RANGE_CHECK src1, bits
-Opcode:  0x94
-Operation: assert(src1 < 2^bits)
-
-Constraints:
-  - Decompose src1 into `bits` binary values
-  - Each bit is 0 or 1
-  - Recomposition equals src1
-```
-
-### I/O Instructions
-
-#### READ - Read Input
-
-```
-Syntax:  READ dst
-Opcode:  0xA0
-Operation: dst = input_buffer[input_ptr++]
-
-Reads next value from input buffer.
-Input buffer is public input to the proof.
-```
-
-#### WRITE - Write Output
-
-```
-Syntax:  WRITE src
-Opcode:  0xA1
-Operation: output_buffer[output_ptr++] = src
-
-Writes value to output buffer.
-Output buffer becomes public output.
-```
-
-#### COMMIT - Commit Public Value
-
-```
-Syntax:  COMMIT src
-Opcode:  0xA2
-Operation: public_values.push(src)
-
-Explicitly marks a value as public output.
-Used for proof verification.
-```
-
----
-
-## Binary File Format
-
-### File Structure
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ZKBC File Format                         │
-├─────────────────────────────────────────────────────────────┤
-│ Magic Number        │ 4 bytes  │ "ZKBC" (0x5A4B4243)       │
-│ Version             │ 4 bytes  │ Format version (0x00010000)│
-│ Flags               │ 4 bytes  │ Feature flags              │
-│ Header Size         │ 4 bytes  │ Size of header section     │
-├─────────────────────────────────────────────────────────────┤
-│ Program Header                                              │
-│ ├─ Entry Point      │ 4 bytes  │ Starting PC               │
-│ ├─ Code Size        │ 4 bytes  │ Number of instructions    │
-│ ├─ Data Size        │ 4 bytes  │ Initial memory size       │
-│ ├─ Stack Size       │ 4 bytes  │ Stack allocation          │
-│ ├─ Num Inputs       │ 4 bytes  │ Expected input count      │
-│ ├─ Num Outputs      │ 4 bytes  │ Expected output count     │
-│ └─ Checksum         │ 32 bytes │ SHA256 of code section    │
-├─────────────────────────────────────────────────────────────┤
-│ Code Section                                                │
-│ └─ Instructions     │ 8 bytes each │ Encoded instructions  │
-├─────────────────────────────────────────────────────────────┤
-│ Data Section                                                │
-│ └─ Initial Memory   │ variable │ Initial memory contents   │
-├─────────────────────────────────────────────────────────────┤
-│ Symbol Table (optional)                                     │
-│ └─ Debug symbols    │ variable │ Function names, etc.      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Magic Number and Version
-
-```rust
-const MAGIC: u32 = 0x5A4B4243;  // "ZKBC"
-const VERSION: u32 = 0x00010000; // v1.0.0
-
-struct ZkbcHeader {
-    magic: u32,
-    version: u32,
-    flags: u32,
-    header_size: u32,
-}
-```
-
-### Program Header
-
-```rust
-struct ProgramHeader {
-    entry_point: u32,
-    code_size: u32,
-    data_size: u32,
-    stack_size: u32,
-    num_inputs: u32,
-    num_outputs: u32,
-    checksum: [u8; 32],
-}
-```
-
-### Flags
-
-```rust
-const FLAG_DEBUG_INFO: u32 = 0x0001;      // Contains debug symbols
-const FLAG_OPTIMIZED: u32 = 0x0002;       // Optimizations applied
-const FLAG_FIELD_64: u32 = 0x0004;        // Uses 64-bit field
-const FLAG_HAS_FIELD_OPS: u32 = 0x0008;   // Uses field registers
+Example:
+  li    a7, 0x10          ; SYS_ECDSA_VERIFY
+  la    a0, msg_hash
+  la    a1, signature
+  la    a2, pubkey
+  ecall
+  bnez  a0, invalid_sig   ; branch if invalid
 ```
 
 ---
@@ -529,432 +513,197 @@ const FLAG_HAS_FIELD_OPS: u32 = 0x0008;   // Uses field registers
 ### Address Space
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 0x00000000 - 0x0000FFFF │ Reserved (64KB)                   │
-├─────────────────────────────────────────────────────────────┤
-│ 0x00010000 - 0x0FFFFFFF │ Code (256MB)                      │
-├─────────────────────────────────────────────────────────────┤
-│ 0x10000000 - 0x1FFFFFFF │ Static Data (256MB)               │
-├─────────────────────────────────────────────────────────────┤
-│ 0x20000000 - 0x7FFFFFFF │ Heap (1.5GB)                      │
-├─────────────────────────────────────────────────────────────┤
-│ 0x80000000 - 0xFFFFFFFF │ Stack (2GB, grows down)           │
-└─────────────────────────────────────────────────────────────┘
+0x00000000 ┌─────────────────┐
+           │   Reserved      │
+0x00001000 ├─────────────────┤
+           │   Code (RX)     │
+0x10000000 ├─────────────────┤
+           │   Data (RW)     │
+0x80000000 ├─────────────────┤
+           │   Heap ↓        │
+           │                 │
+           │   Stack ↑       │
+0xFFFF0000 ├─────────────────┤
+           │   Reserved      │
+0xFFFFFFFF └─────────────────┘
 ```
 
-### Memory Cell
+### Constants
 
 ```rust
-// Each memory cell holds a field element
-type MemoryCell = FieldElement;
+pub const CODE_BASE: u32 = 0x0000_1000;
+pub const DATA_BASE: u32 = 0x1000_0000;
+pub const HEAP_BASE: u32 = 0x8000_0000;
+pub const STACK_TOP: u32 = 0xFFFF_0000;
 
-// Memory is word-addressed (not byte-addressed)
-// Each address holds one field element
-```
-
-### Memory Access Rules
-
-```
-1. All memory accesses must be aligned
-2. Memory is initialized to zero
-3. Stack grows downward from 0xFFFFFFFF
-4. Heap grows upward from 0x20000000
-5. Out-of-bounds access causes TRAP
+pub const DEFAULT_STACK_SIZE: u32 = 1 << 20;  // 1 MB
+pub const DEFAULT_HEAP_SIZE: u32 = 1 << 20;   // 1 MB
 ```
 
 ---
 
-## Execution Model
+## Calling Convention
 
-### Execution Cycle
+### Function Calls
 
 ```
-1. FETCH:   instruction = code[pc]
-2. DECODE:  parse opcode, operands
-3. EXECUTE: perform operation
-4. TRACE:   record state for proving
-5. UPDATE:  pc = next_pc
-6. REPEAT:  until HALT or TRAP
+Arguments:
+  a0-a3 (r4-r7):     First 4 arguments (32-bit each)
+  stack:             Additional arguments
+
+Return:
+  rv (r1):           32-bit return value
+  (rv, a0):          64-bit return (low, high)
+
+Caller-saved:  rv, a0-a3, t0-t11, ra
+Callee-saved:  sp, fp, s0-s7
 ```
 
-### Execution State
+### 64-bit Arguments
 
-```rust
-struct ExecutionState {
-    pc: u32,
-    registers: [FieldElement; 32],
-    field_registers: [FieldElement; 16],
-    memory: HashMap<u32, FieldElement>,
-    stack_pointer: u32,
-    frame_pointer: u32,
-    call_stack: Vec<u32>,
-    input_buffer: Vec<FieldElement>,
-    input_ptr: usize,
-    output_buffer: Vec<FieldElement>,
-    halted: bool,
-    trapped: bool,
-}
+```
+64-bit arg 1:  (a0, a1)
+64-bit arg 2:  (a2, a3)
+Additional:    stack
+
+64-bit return: (rv, a0) = (low, high)
 ```
 
-### Execution Trace
+### Stack Frame
 
-```rust
-struct TraceRow {
-    cycle: u64,
-    pc: u32,
-    opcode: u8,
-    operands: [u32; 3],
-    registers_before: [FieldElement; 32],
-    registers_after: [FieldElement; 32],
-    memory_addr: Option<u32>,
-    memory_value: Option<FieldElement>,
-    memory_op: MemoryOp,  // Read, Write, None
-}
-
-enum MemoryOp {
-    None,
-    Read,
-    Write,
-}
+```
+High addr   ┌─────────────────┐
+            │  Arg N          │
+            │  ...            │
+            │  Arg 5          │
+            ├─────────────────┤
+            │  Return addr    │
+            ├─────────────────┤
+            │  Saved FP       │ ← FP
+            ├─────────────────┤
+            │  Saved s0-s7    │
+            ├─────────────────┤
+            │  Local vars     │
+            │  ...            │ ← SP
+Low addr    └─────────────────┘
 ```
 
 ---
 
-## Constraint System
+## Program Binary Format (.zkbc)
 
-### Per-Instruction Constraints
+### Header
 
-Each instruction type generates specific algebraic constraints:
-
-```
-ADD (dst = src1 + src2):
-  Constraints: 1
-  - registers[dst]' = registers[src1] + registers[src2]
-
-MUL (dst = src1 * src2):
-  Constraints: 1
-  - registers[dst]' = registers[src1] * registers[src2]
-
-LOAD (dst = mem[addr]):
-  Constraints: ~3
-  - addr = base + offset
-  - registers[dst]' = memory_value
-  - Memory permutation check
-
-BEQ (branch if equal):
-  Constraints: ~3
-  - eq = (src1 == src2)
-  - pc' = eq * target + (1-eq) * (pc + 1)
+```rust
+#[repr(C)]
+pub struct ProgramHeader {
+    pub magic: u32,         // "ZKIR" = 0x5A4B4952
+    pub version: u32,       // Binary format version
+    pub flags: u32,         // Reserved
+    pub entry_point: u32,   // Entry address
+    pub code_size: u32,     // Code section size (bytes)
+    pub data_size: u32,     // Data section size (bytes)
+    pub bss_size: u32,      // BSS size (bytes)
+}
 ```
 
-### Memory Consistency
+### File Layout
 
 ```
-Memory operations proven via permutation argument:
-
-1. Create sorted list of (address, timestamp, value, is_write)
-2. For each consecutive pair with same address:
-   - If second is read: value must match previous write
-   - If second is write: timestamp must be greater
-3. Prove permutation between execution order and sorted order
-```
-
-### Estimated Constraints Per Instruction
-
-```
-Instruction      | Constraints | Notes
------------------|-------------|---------------------------
-ADD/SUB/MUL      | 1-2         | Simple field operation
-DIV/MOD          | 10-15       | Requires inverse + range check
-AND/OR/XOR       | 20-30       | Bit decomposition needed
-SHL/SHR          | 15-25       | Bit operations
-LOAD/STORE       | 3-5         | Memory consistency
-BEQ/BNE/etc      | 3-5         | Conditional PC update
-CALL/RET         | 5-8         | Stack operations
-FADD/FMUL        | 1           | Native field operation
-FINV             | 2           | Inverse constraint
-HASH             | 200-300     | Poseidon permutation
-RANGE_CHECK      | n           | n = number of bits
+┌──────────────────────────────┐
+│  Header (28 bytes)           │
+├──────────────────────────────┤
+│  Code Section                │
+│  (instructions, 4 bytes each)│
+├──────────────────────────────┤
+│  Data Section                │
+│  (initialized data)          │
+├──────────────────────────────┤
+│  Symbol Table (optional)     │
+└──────────────────────────────┘
 ```
 
 ---
 
 ## Assembly Syntax
 
-### Basic Syntax
-
-```asm
-; Comment (semicolon)
-label:              ; Label definition
-    ADD r1, r2, r3  ; Instruction
-
-; Register names: r0-r31, f0-f15
-; Immediates: decimal (42), hex (0x2A), binary (0b101010)
-```
-
 ### Example Program
 
 ```asm
-; Fibonacci sequence
-; Input: n (which Fibonacci number to compute)
-; Output: fib(n)
+.section .text
+.global _start
 
-.entry main
-
-main:
-    READ r4             ; r4 = n (input)
-    LI r1, 0            ; r1 = fib(0) = 0
-    LI r2, 1            ; r2 = fib(1) = 1
-    LI r3, 0            ; r3 = counter
+_start:
+    ; Read input
+    read    a0              ; n = input
     
-loop:
-    BEQ r3, r4, done    ; if counter == n, done
-    ADD r5, r1, r2      ; r5 = fib(i-1) + fib(i-2)
-    MOV r1, r2          ; shift: r1 = old r2
-    MOV r2, r5          ; shift: r2 = new fib
-    ADDI r3, r3, 1      ; counter++
-    JMP loop
+    ; Call fibonacci
+    jal     ra, fib
     
-done:
-    WRITE r1            ; output result
-    COMMIT r1           ; commit as public output
-    HALT
-```
+    ; Output result
+    write   rv
+    halt
 
-### Directives
-
-```asm
-.entry <label>      ; Set entry point
-.data               ; Start data section
-.code               ; Start code section
-.word <value>       ; Define word constant
-.space <size>       ; Reserve space
-.align <n>          ; Align to n bytes
-```
-
----
-
-## Standard Library (Built-in Functions)
-
-### Memory Operations
-
-```
-memcpy(dst, src, len)  - Copy memory
-memset(dst, val, len)  - Fill memory
-```
-
-### Cryptographic Primitives
-
-```
-poseidon_hash(a, b)        - 2-to-1 Poseidon hash
-poseidon_hash4(a, b, c, d) - 4-to-1 Poseidon hash
-merkle_verify(root, leaf, path, index) - Merkle proof verification
-```
-
-### Utility Functions
-
-```
-assert_eq(a, b)     - Assert equality
-range_check(v, bits) - Check value fits in bits
-```
-
----
-
-## Implementation Notes
-
-### Recommended Crates
-
-```toml
-[dependencies]
-# Field arithmetic
-p3-field = { git = "https://github.com/Plonky3/Plonky3" }
-p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3" }
-
-# Or use:
-ark-ff = "0.4"            # arkworks field arithmetic
-goldilocks = "0.2"        # Goldilocks field
-
-# Parsing
-nom = "7"                 # Parser combinators
-logos = "0.13"            # Lexer generator
-
-# Serialization
-bincode = "1.3"           # Binary serialization
-serde = { version = "1", features = ["derive"] }
-
-# Utilities
-thiserror = "1"           # Error handling
-tracing = "0.1"           # Logging
-```
-
-### Project Structure
-
-```
-zkir/
-├── Cargo.toml
-├── crates/
-│   ├── zkir-spec/           # Types, opcodes, encoding
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── opcode.rs
-│   │   │   ├── instruction.rs
-│   │   │   ├── program.rs
-│   │   │   └── encoding.rs
-│   │   └── Cargo.toml
-│   │
-│   ├── zkir-assembler/      # Assembly parser
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── lexer.rs
-│   │   │   ├── parser.rs
-│   │   │   └── codegen.rs
-│   │   └── Cargo.toml
-│   │
-│   └── zkir-disassembler/   # Bytecode to assembly
-│       ├── src/
-│       │   └── lib.rs
-│       └── Cargo.toml
-│
-└── examples/
-    ├── fibonacci.zkasm
-    ├── sha256.zkasm
-    └── merkle.zkasm
-```
-
----
-
-## Testing Strategy
-
-### Unit Tests
-
-```rust
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_add_encoding() {
-        let instr = Instruction::Add { dst: 1, src1: 2, src2: 3 };
-        let encoded = instr.encode();
-        let decoded = Instruction::decode(encoded);
-        assert_eq!(instr, decoded);
-    }
+; Fibonacci function
+; Input: a0 = n
+; Output: rv = fib(n)
+fib:
+    li      t0, 2
+    blt     a0, t0, fib_base
     
-    #[test]
-    fn test_program_serialization() {
-        let program = Program::new(vec![
-            Instruction::Li { dst: 1, imm: 42 },
-            Instruction::Halt,
-        ]);
-        let bytes = program.to_bytes();
-        let loaded = Program::from_bytes(&bytes);
-        assert_eq!(program, loaded);
-    }
-}
-```
-
-### Integration Tests
-
-```rust
-#[test]
-fn test_fibonacci() {
-    let program = assemble_file("examples/fibonacci.zkasm");
-    let inputs = vec![FieldElement::from(10)];
-    let outputs = execute(&program, inputs);
-    assert_eq!(outputs[0], FieldElement::from(55)); // fib(10) = 55
-}
-```
-
----
-
-## Version History
-
-| Version | Date       | Changes                     |
-|---------|------------|-----------------------------|
-| 0.1.0   | 2024-XX-XX | Initial specification       |
-
----
-
-## References
-
-1. RISC-V Specification - https://riscv.org/specifications/
-2. LLVM Language Reference - https://llvm.org/docs/LangRef.html
-3. Plonky3 - https://github.com/Plonky3/Plonky3
-4. Winterfell - https://github.com/facebook/winterfell
-5. SP1 - https://github.com/succinctlabs/sp1
-6. Valida - https://github.com/valida-xyz/valida
-
----
-
-## Appendix A: Opcode Quick Reference
-
-```
-0x01 ADD    0x20 AND    0x40 LOAD   0x60 CALL   0x80 FADD   0xA0 READ
-0x02 SUB    0x21 OR     0x41 STORE  0x61 CALLI  0x81 FSUB   0xA1 WRITE  
-0x03 MUL    0x22 XOR    0x42 LOAD8  0x62 RET    0x82 FMUL   0xA2 COMMIT
-0x04 DIV    0x23 NOT    0x43 LOAD16           0x83 FINV
-0x05 SDIV   0x24 SHL    0x44 STORE8           0x84 FNEG
-0x06 MOD    0x25 SHR    0x45 STORE16
-0x07 SMOD   0x26 SAR                          0x90 HASH
-0x08 NEG                                       0x91 HASH4
-                         0x50 JMP              0x92 ASSERT_EQ
-0x10 ADDI   0x30 EQ     0x51 JMPI             0x93 ASSERT_ZERO
-0x11 SUBI   0x31 NE     0x52 BEQ              0x94 RANGE_CHECK
-0x12 MULI   0x32 LT     0x53 BNE    0x70 LI
-            0x33 LE     0x54 BLT    0x71 LUI   0xF0 NOP
-            0x34 GT     0x55 BGE    0x72 MOV   0xF1 HALT
-            0x35 GE     0x56 BLTU             0xFF INVALID
-            0x36 LTU    0x57 BGEU
-            0x37 GEU
-```
-
----
-
-## Appendix B: Example Programs
-
-### Example 1: Simple Addition
-
-```asm
-.entry main
-
-main:
-    READ r1          ; Read first input
-    READ r2          ; Read second input
-    ADD r3, r1, r2   ; r3 = r1 + r2
-    WRITE r3         ; Output result
-    HALT
-```
-
-### Example 2: Factorial
-
-```asm
-.entry main
-
-main:
-    READ r1          ; r1 = n
-    LI r2, 1         ; r2 = result = 1
+    ; Iterative fibonacci
+    li      t0, 0           ; prev = 0
+    li      t1, 1           ; curr = 1
+    li      t2, 1           ; i = 1
     
-loop:
-    BEQ r1, r0, done ; if n == 0, done
-    MUL r2, r2, r1   ; result *= n
-    SUBI r1, r1, 1   ; n--
-    JMP loop
+fib_loop:
+    beq     t2, a0, fib_done
+    add     t3, t0, t1      ; next = prev + curr
+    mv      t0, t1          ; prev = curr
+    mv      t1, t3          ; curr = next
+    addi    t2, t2, 1       ; i++
+    j       fib_loop
     
-done:
-    WRITE r2         ; output result
-    HALT
+fib_done:
+    mv      rv, t1
+    ret
+    
+fib_base:
+    mv      rv, a0
+    ret
+
+.section .data
+; No data needed
 ```
 
-### Example 3: Hash Computation
+### Pseudo-instructions
 
-```asm
-.entry main
+| Pseudo | Expansion |
+|--------|-----------|
+| `li rd, imm` | `lui` + `addi` |
+| `la rd, label` | `auipc` + `addi` |
+| `mv rd, rs` | `addi rd, rs, 0` |
+| `not rd, rs` | `xori rd, rs, -1` |
+| `neg rd, rs` | `sub rd, zero, rs` |
+| `j offset` | `jal zero, offset` |
+| `jr rs` | `jalr zero, rs, 0` |
+| `ret` | `jalr zero, ra, 0` |
+| `call label` | `jal ra, label` |
+| `nop` | `addi zero, zero, 0` |
 
-main:
-    READ r1              ; Read value to hash
-    MOV f0, r1           ; Move to field register
-    LI f1, 0             ; Second input = 0
-    HASH f2, f0, f1      ; f2 = Poseidon(f0, f1)
-    MOV r2, f2           ; Move back to general register
-    WRITE r2             ; Output hash
-    COMMIT r2            ; Commit as public value
-    HALT
-```
+---
+
+## Constraint Costs
+
+| Instruction | Constraints | Notes |
+|-------------|-------------|-------|
+| ADD/SUB/ADDI | ~3 | Arithmetic + range |
+| MUL | ~5 | 32×32 multiply |
+| DIV/REM | ~30 | Expensive |
+| AND/OR/XOR | ~35 | Bit decomposition |
+| SLL/SRL/SRA | ~40 | Shift logic |
+| LW/SW | ~40 | Memory permutation |
+| LB/LH/etc | ~45 | Partial word |
+| BEQ/BNE/etc | ~10 | Comparison |
+| JAL/JALR | ~5 | PC update |
+| ECALL (hash) | ~200-300 | Via dedicated chip |
