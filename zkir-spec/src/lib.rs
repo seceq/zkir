@@ -1,60 +1,48 @@
 //! # ZK IR Specification
 //!
-//! This crate defines the core types and encoding for the ZK IR bytecode format.
+//! 32-bit register-based instruction set for zero-knowledge proof generation.
 //!
-//! ## Overview
-//!
-//! ZK IR is a bytecode format designed for efficient zero-knowledge proof generation.
-//! It features:
-//! - Simple instruction set (~40 instructions)
-//! - Fixed-width 64-bit instruction encoding
-//! - ZK-friendly operations (native field arithmetic, hashing)
-//! - Deterministic execution
-//!
-//! ## Example
-//!
-//! ```rust
-//! use zkir_spec::{Instruction, Opcode, Program, Register};
-//!
-//! // Create a simple program: r1 = r2 + r3
-//! let instructions = vec![
-//!     Instruction::new_r(Opcode::Add, Register::R1, Register::R2, Register::R3),
-//!     Instruction::new_halt(),
-//! ];
-//!
-//! let program = Program::new(instructions);
-//! let bytes = program.to_bytes();
-//! ```
+//! ## Key Features
+//! - 32-bit architecture (RISC-V inspired)
+//! - Baby Bear field (p = 2^31 - 2^27 + 1)
+//! - No field registers (use syscalls for crypto)
+//! - Register pairs for 64-bit values
+//! - Syscalls for cryptographic operations
 
-pub mod opcode;
-pub mod instruction;
-pub mod register;
-pub mod program;
-pub mod encoding;
 pub mod field;
+pub mod register;
+pub mod instruction;
 pub mod error;
+pub mod program;
 
-pub use opcode::Opcode;
+pub use field::{BabyBear, BABYBEAR_PRIME};
+pub use register::{Register, NUM_REGISTERS};
 pub use instruction::Instruction;
-pub use register::Register;
-pub use program::Program;
-pub use field::FieldElement;
 pub use error::ZkIrError;
+pub use program::{Program, ProgramHeader};
 
-/// Magic number for ZKBC files: "ZKBC" in ASCII
-pub const MAGIC: u32 = 0x5A4B4243;
+/// Magic number for ZKIR files: "ZKIR" = 0x5A4B4952
+pub const MAGIC: u32 = 0x5A4B4952;
 
-/// Current format version: 1.0.0
-pub const VERSION: u32 = 0x00010000;
+/// Version
+pub const VERSION: u32 = 0x00020001;
 
-/// Number of general-purpose registers
-pub const NUM_REGISTERS: usize = 32;
+/// Memory layout constants
+pub const CODE_BASE: u32 = 0x0000_1000;
+pub const DATA_BASE: u32 = 0x1000_0000;
+pub const HEAP_BASE: u32 = 0x8000_0000;
+pub const STACK_TOP: u32 = 0xFFFF_0000;
 
-/// Number of field registers
-pub const NUM_FIELD_REGISTERS: usize = 16;
+/// Default sizes
+pub const DEFAULT_STACK_SIZE: u32 = 1 << 20;  // 1 MB
+pub const DEFAULT_HEAP_SIZE: u32 = 1 << 20;   // 1 MB
+pub const DEFAULT_CODE_SIZE: u32 = 1 << 18;   // 256 KB
 
-/// Default stack size in words
-pub const DEFAULT_STACK_SIZE: u32 = 0x100000; // 1MB worth of field elements
+/// Word size (32-bit)
+pub type Word = u32;
 
-/// Default heap size in words  
-pub const DEFAULT_HEAP_SIZE: u32 = 0x1000000; // 16MB worth of field elements
+/// Address type (32-bit)
+pub type Address = u32;
+
+/// Signed word
+pub type SWord = i32;
