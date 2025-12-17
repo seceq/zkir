@@ -55,16 +55,16 @@ cargo build --all --release
 │                    ZK IR Architecture                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  Integer Registers (32 × 32-bit):                              │
-│  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───────────┐ │
-│  │  r0 │  r1 │  r2 │  r3 │ r4  │ r5  │ r6  │ r7  │ r8-r31    │ │
-│  │ =0  │  rv │  sp │  fp │ a0  │ a1  │ a2  │ a3  │ temp/saved│ │
-│  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───────────┘ │
+│  Integer Registers (32 × 32-bit):                               │
+│  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───────────┐  │
+│  │  r0 │  r1 │  r2 │  r3 │ r4  │ r5  │ r6  │ r7  │ r8-r31    │  │
+│  │ =0  │  rv │  sp │  fp │ a0  │ a1  │ a2  │ a3  │ temp/saved│  │
+│  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───────────┘  │
 │                                                                 │
-│  NO field registers (use syscalls for crypto)                  │
+│  NO field registers (use syscalls for crypto)                   │
 │                                                                 │
-│  Memory: 32-bit addressable, 32-bit words, little-endian       │
-│  Field: Baby Bear (p = 2^31 - 2^27 + 1)                        │
+│  Memory: 32-bit addressable, 32-bit words, little-endian        │
+│  Field: Baby Bear (p = 2^31 - 2^27 + 1)                         │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
