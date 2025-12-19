@@ -127,9 +127,59 @@ fn parse_i_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i
 
     let rd = parse_register(parts[0])?;
     let rs1 = parse_register(parts[1])?;
-    let imm = parse_immediate(parts[2])? as i16;
+    let imm_val = parse_immediate(parts[2])?;
+
+    if imm_val < -2048 || imm_val > 2047 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Immediate value {} out of range (must be -2048 to 2047)", imm_val),
+        });
+    }
+
+    let imm = imm_val as i16;
 
     Ok((rd, rs1, imm))
+}
+
+/// Parse memory operand format: offset(register)
+fn parse_memory_operand(mem_operand: &str) -> Result<(Register, i16)> {
+    if let Some(paren_pos) = mem_operand.find('(') {
+        let offset_str = &mem_operand[..paren_pos];
+        let reg_str = &mem_operand[paren_pos+1..];
+
+        if !reg_str.ends_with(')') {
+            return Err(AssemblerError::SyntaxError {
+                line: 0,
+                column: 0,
+                message: format!("Missing closing parenthesis in: {}", mem_operand),
+            });
+        }
+
+        let reg_str = &reg_str[..reg_str.len()-1];
+        let imm = if offset_str.is_empty() {
+            0
+        } else {
+            let imm_val = parse_immediate(offset_str)?;
+            if imm_val < -2048 || imm_val > 2047 {
+                return Err(AssemblerError::SyntaxError {
+                    line: 0,
+                    column: 0,
+                    message: format!("Offset value {} out of range (must be -2048 to 2047)", imm_val),
+                });
+            }
+            imm_val as i16
+        };
+        let rs1 = parse_register(reg_str)?;
+
+        Ok((rs1, imm))
+    } else {
+        Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Invalid memory operand: {}", mem_operand),
+        })
+    }
 }
 
 /// Parse I-type load instruction: mnemonic rd, offset(rs1)
@@ -144,33 +194,9 @@ fn parse_load(mnemonic: &str, operands: &str) -> Result<(Register, Register, i16
     }
 
     let rd = parse_register(parts[0])?;
+    let (rs1, imm) = parse_memory_operand(parts[1])?;
 
-    // Parse offset(rs1)
-    let mem_operand = parts[1];
-    if let Some(paren_pos) = mem_operand.find('(') {
-        let offset_str = &mem_operand[..paren_pos];
-        let reg_str = &mem_operand[paren_pos+1..];
-
-        if !reg_str.ends_with(')') {
-            return Err(AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Missing closing parenthesis in: {}", mem_operand),
-            });
-        }
-
-        let reg_str = &reg_str[..reg_str.len()-1];
-        let imm = if offset_str.is_empty() { 0 } else { parse_immediate(offset_str)? as i16 };
-        let rs1 = parse_register(reg_str)?;
-
-        Ok((rd, rs1, imm))
-    } else {
-        Err(AssemblerError::SyntaxError {
-            line: 0,
-            column: 0,
-            message: format!("Invalid memory operand: {}", mem_operand),
-        })
-    }
+    Ok((rd, rs1, imm))
 }
 
 /// Parse S-type store instruction: mnemonic rs2, offset(rs1)
@@ -185,33 +211,9 @@ fn parse_store(mnemonic: &str, operands: &str) -> Result<(Register, Register, i1
     }
 
     let rs2 = parse_register(parts[0])?;
+    let (rs1, imm) = parse_memory_operand(parts[1])?;
 
-    // Parse offset(rs1)
-    let mem_operand = parts[1];
-    if let Some(paren_pos) = mem_operand.find('(') {
-        let offset_str = &mem_operand[..paren_pos];
-        let reg_str = &mem_operand[paren_pos+1..];
-
-        if !reg_str.ends_with(')') {
-            return Err(AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Missing closing parenthesis in: {}", mem_operand),
-            });
-        }
-
-        let reg_str = &reg_str[..reg_str.len()-1];
-        let imm = if offset_str.is_empty() { 0 } else { parse_immediate(offset_str)? as i16 };
-        let rs1 = parse_register(reg_str)?;
-
-        Ok((rs1, rs2, imm))
-    } else {
-        Err(AssemblerError::SyntaxError {
-            line: 0,
-            column: 0,
-            message: format!("Invalid memory operand: {}", mem_operand),
-        })
-    }
+    Ok((rs1, rs2, imm))
 }
 
 /// Parse B-type branch instruction: mnemonic rs1, rs2, offset
@@ -227,7 +229,17 @@ fn parse_b_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i
 
     let rs1 = parse_register(parts[0])?;
     let rs2 = parse_register(parts[1])?;
-    let imm = parse_immediate(parts[2])? as i16;
+    let imm_val = parse_immediate(parts[2])?;
+
+    if imm_val < -4096 || imm_val > 4094 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Branch offset {} out of range (must be -4096 to 4094)", imm_val),
+        });
+    }
+
+    let imm = imm_val as i16;
 
     Ok((rs1, rs2, imm))
 }
@@ -369,18 +381,45 @@ fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
 
         // I-type: Shift Immediate (special handling for shamt)
         "slli" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            let shamt = parse_shamt(&imm.to_string())?;
+            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+            if parts.len() != 3 {
+                return Err(AssemblerError::SyntaxError {
+                    line: 0,
+                    column: 0,
+                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
+                });
+            }
+            let rd = parse_register(parts[0])?;
+            let rs1 = parse_register(parts[1])?;
+            let shamt = parse_shamt(parts[2])?;
             Ok(Instruction::Slli { rd, rs1, shamt })
         }
         "srli" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            let shamt = parse_shamt(&imm.to_string())?;
+            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+            if parts.len() != 3 {
+                return Err(AssemblerError::SyntaxError {
+                    line: 0,
+                    column: 0,
+                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
+                });
+            }
+            let rd = parse_register(parts[0])?;
+            let rs1 = parse_register(parts[1])?;
+            let shamt = parse_shamt(parts[2])?;
             Ok(Instruction::Srli { rd, rs1, shamt })
         }
         "srai" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            let shamt = parse_shamt(&imm.to_string())?;
+            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+            if parts.len() != 3 {
+                return Err(AssemblerError::SyntaxError {
+                    line: 0,
+                    column: 0,
+                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
+                });
+            }
+            let rd = parse_register(parts[0])?;
+            let rs1 = parse_register(parts[1])?;
+            let shamt = parse_shamt(parts[2])?;
             Ok(Instruction::Srai { rd, rs1, shamt })
         }
 
