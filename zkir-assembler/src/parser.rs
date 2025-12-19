@@ -68,11 +68,111 @@ pub fn parse_register(name: &str) -> Result<Register> {
     }
 }
 
-fn parse_mnemonic(mnemonic: &str, _operands: &str) -> Result<Instruction> {
+/// Parse single register operand
+fn parse_single_register(operands: &str) -> Result<Register> {
+    let operands = operands.trim();
+    if operands.is_empty() {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Expected register operand".to_string(),
+        });
+    }
+    parse_register(operands)
+}
+
+/// Parse two register operands: rs1, rs2
+fn parse_two_registers(operands: &str) -> Result<(Register, Register)> {
+    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Expected 2 register operands".to_string(),
+        });
+    }
+
+    let rs1 = parse_register(parts[0])?;
+    let rs2 = parse_register(parts[1])?;
+    Ok((rs1, rs2))
+}
+
+/// Parse register and immediate: rs1, imm
+fn parse_register_immediate(operands: &str) -> Result<(Register, u8)> {
+    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Expected register and immediate".to_string(),
+        });
+    }
+
+    let rs1 = parse_register(parts[0])?;
+    let imm_str = parts[1].trim();
+
+    let imm = if imm_str.starts_with("0x") || imm_str.starts_with("0X") {
+        u8::from_str_radix(&imm_str[2..], 16)
+            .map_err(|_| AssemblerError::SyntaxError {
+                line: 0,
+                column: 0,
+                message: format!("Invalid immediate value: {}", imm_str),
+            })?
+    } else {
+        imm_str.parse::<u8>()
+            .map_err(|_| AssemblerError::SyntaxError {
+                line: 0,
+                column: 0,
+                message: format!("Invalid immediate value: {}", imm_str),
+            })?
+    };
+
+    Ok((rs1, imm))
+}
+
+fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
     match mnemonic {
+        // System
         "halt" => Ok(Instruction::Halt),
         "ecall" => Ok(Instruction::Ecall),
         "ebreak" => Ok(Instruction::Ebreak),
+
+        // ZK I/O
+        "read" => {
+            let rd = parse_single_register(operands)?;
+            Ok(Instruction::Read { rd })
+        }
+        "write" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::Write { rs1 })
+        }
+        "hint" => {
+            let rd = parse_single_register(operands)?;
+            Ok(Instruction::Hint { rd })
+        }
+
+        // ZK Custom
+        "assert_eq" => {
+            let (rs1, rs2) = parse_two_registers(operands)?;
+            Ok(Instruction::AssertEq { rs1, rs2 })
+        }
+        "assert_ne" => {
+            let (rs1, rs2) = parse_two_registers(operands)?;
+            Ok(Instruction::AssertNe { rs1, rs2 })
+        }
+        "assert_zero" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::AssertZero { rs1 })
+        }
+        "range_check" => {
+            let (rs1, bits) = parse_register_immediate(operands)?;
+            Ok(Instruction::RangeCheck { rs1, bits })
+        }
+        "commit" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::Commit { rs1 })
+        }
+
         _ => Err(AssemblerError::UnknownInstruction(mnemonic.to_string())),
     }
 }
@@ -102,5 +202,98 @@ mod tests {
     fn test_parse_ecall() {
         let instr = parse_instruction("ecall").unwrap();
         assert_eq!(instr, Instruction::Ecall);
+    }
+
+    #[test]
+    fn test_parse_ebreak() {
+        let instr = parse_instruction("ebreak").unwrap();
+        assert_eq!(instr, Instruction::Ebreak);
+    }
+
+    // ZK I/O tests
+    #[test]
+    fn test_parse_read() {
+        let instr = parse_instruction("read a0").unwrap();
+        assert_eq!(instr, Instruction::Read { rd: Register::R4 });
+    }
+
+    #[test]
+    fn test_parse_write() {
+        let instr = parse_instruction("write a1").unwrap();
+        assert_eq!(instr, Instruction::Write { rs1: Register::R5 });
+    }
+
+    #[test]
+    fn test_parse_hint() {
+        let instr = parse_instruction("hint t0").unwrap();
+        assert_eq!(instr, Instruction::Hint { rd: Register::R8 });
+    }
+
+    // ZK Custom tests
+    #[test]
+    fn test_parse_assert_eq() {
+        let instr = parse_instruction("assert_eq a0, a1").unwrap();
+        assert_eq!(instr, Instruction::AssertEq {
+            rs1: Register::R4,
+            rs2: Register::R5,
+        });
+    }
+
+    #[test]
+    fn test_parse_assert_ne() {
+        let instr = parse_instruction("assert_ne t0, t1").unwrap();
+        assert_eq!(instr, Instruction::AssertNe {
+            rs1: Register::R8,
+            rs2: Register::R9,
+        });
+    }
+
+    #[test]
+    fn test_parse_assert_zero() {
+        let instr = parse_instruction("assert_zero a2").unwrap();
+        assert_eq!(instr, Instruction::AssertZero { rs1: Register::R6 });
+    }
+
+    #[test]
+    fn test_parse_range_check() {
+        let instr = parse_instruction("range_check a0, 32").unwrap();
+        assert_eq!(instr, Instruction::RangeCheck {
+            rs1: Register::R4,
+            bits: 32,
+        });
+    }
+
+    #[test]
+    fn test_parse_range_check_hex() {
+        let instr = parse_instruction("range_check a0, 0x10").unwrap();
+        assert_eq!(instr, Instruction::RangeCheck {
+            rs1: Register::R4,
+            bits: 16,
+        });
+    }
+
+    #[test]
+    fn test_parse_commit() {
+        let instr = parse_instruction("commit s0").unwrap();
+        assert_eq!(instr, Instruction::Commit { rs1: Register::R16 });
+    }
+
+    // Error cases
+    #[test]
+    fn test_parse_read_no_operand() {
+        let result = parse_instruction("read");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_assert_eq_one_operand() {
+        let result = parse_instruction("assert_eq a0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_range_check_no_immediate() {
+        let result = parse_instruction("range_check a0");
+        assert!(result.is_err());
     }
 }
