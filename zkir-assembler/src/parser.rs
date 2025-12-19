@@ -274,6 +274,61 @@ fn parse_shamt(text: &str) -> Result<u8> {
     Ok(shamt as u8)
 }
 
+/// Parse single register operand: mnemonic rs1
+fn parse_single_register(operands: &str) -> Result<Register> {
+    let operands = operands.trim();
+    if operands.is_empty() {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Missing register operand".to_string(),
+        });
+    }
+    parse_register(operands)
+}
+
+/// Parse two register operands: mnemonic rs1, rs2
+fn parse_two_registers(operands: &str) -> Result<(Register, Register)> {
+    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Requires 2 operands: rs1, rs2".to_string(),
+        });
+    }
+
+    let rs1 = parse_register(parts[0])?;
+    let rs2 = parse_register(parts[1])?;
+
+    Ok((rs1, rs2))
+}
+
+/// Parse register and u8 operands: mnemonic rs1, value
+fn parse_register_u8(operands: &str) -> Result<(Register, u8)> {
+    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: "Requires 2 operands: rs1, value".to_string(),
+        });
+    }
+
+    let rs1 = parse_register(parts[0])?;
+    let value = parse_immediate(parts[1])?;
+
+    if value < 0 || value > 255 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Value must be 0-255, got {}", value),
+        });
+    }
+
+    Ok((rs1, value as u8))
+}
+
 fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
     match mnemonic {
         // System
@@ -503,6 +558,42 @@ fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
         "auipc" => {
             let (rd, imm) = parse_u_type(mnemonic, operands)?;
             Ok(Instruction::Auipc { rd, imm })
+        }
+
+        // ZK I/O
+        "read" => {
+            let rd = parse_single_register(operands)?;
+            Ok(Instruction::Read { rd })
+        }
+        "write" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::Write { rs1 })
+        }
+        "hint" => {
+            let rd = parse_single_register(operands)?;
+            Ok(Instruction::Hint { rd })
+        }
+
+        // ZK-Custom
+        "assert_eq" => {
+            let (rs1, rs2) = parse_two_registers(operands)?;
+            Ok(Instruction::AssertEq { rs1, rs2 })
+        }
+        "assert_ne" => {
+            let (rs1, rs2) = parse_two_registers(operands)?;
+            Ok(Instruction::AssertNe { rs1, rs2 })
+        }
+        "assert_zero" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::AssertZero { rs1 })
+        }
+        "range_check" => {
+            let (rs1, bits) = parse_register_u8(operands)?;
+            Ok(Instruction::RangeCheck { rs1, bits })
+        }
+        "commit" => {
+            let rs1 = parse_single_register(operands)?;
+            Ok(Instruction::Commit { rs1 })
         }
 
         _ => Err(AssemblerError::UnknownInstruction(mnemonic.to_string())),
@@ -983,6 +1074,84 @@ mod tests {
         assert_eq!(instr, Instruction::Auipc {
             rd: Register::R4,
             imm: 0x1000,
+        });
+    }
+
+    // ZK I/O tests
+    #[test]
+    fn test_parse_read() {
+        let instr = parse_instruction("read a0").unwrap();
+        assert_eq!(instr, Instruction::Read {
+            rd: Register::R4,
+        });
+    }
+
+    #[test]
+    fn test_parse_write() {
+        let instr = parse_instruction("write a0").unwrap();
+        assert_eq!(instr, Instruction::Write {
+            rs1: Register::R4,
+        });
+    }
+
+    #[test]
+    fn test_parse_hint() {
+        let instr = parse_instruction("hint a0").unwrap();
+        assert_eq!(instr, Instruction::Hint {
+            rd: Register::R4,
+        });
+    }
+
+    // ZK-Custom tests
+    #[test]
+    fn test_parse_assert_eq() {
+        let instr = parse_instruction("assert_eq a0, a1").unwrap();
+        assert_eq!(instr, Instruction::AssertEq {
+            rs1: Register::R4,
+            rs2: Register::R5,
+        });
+    }
+
+    #[test]
+    fn test_parse_assert_ne() {
+        let instr = parse_instruction("assert_ne a0, a1").unwrap();
+        assert_eq!(instr, Instruction::AssertNe {
+            rs1: Register::R4,
+            rs2: Register::R5,
+        });
+    }
+
+    #[test]
+    fn test_parse_assert_zero() {
+        let instr = parse_instruction("assert_zero a0").unwrap();
+        assert_eq!(instr, Instruction::AssertZero {
+            rs1: Register::R4,
+        });
+    }
+
+    #[test]
+    fn test_parse_range_check() {
+        let instr = parse_instruction("range_check a0, 32").unwrap();
+        assert_eq!(instr, Instruction::RangeCheck {
+            rs1: Register::R4,
+            bits: 32,
+        });
+    }
+
+    #[test]
+    fn test_parse_range_check_hex() {
+        let instr = parse_instruction("range_check a0, 0x10").unwrap();
+        assert_eq!(instr, Instruction::RangeCheck {
+            rs1: Register::R4,
+            bits: 16,
+        });
+    }
+
+    #[test]
+    fn test_parse_commit() {
+        let instr = parse_instruction("commit a0").unwrap();
+        assert_eq!(instr, Instruction::Commit {
+            rs1: Register::R4,
         });
     }
 
