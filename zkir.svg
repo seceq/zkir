@@ -25,6 +25,6 @@
   <path d="M 245 100 Q 260 100 260 120 L 260 145 Q 260 155 270 155 Q 260 155 260 165 L 260 190 Q 260 210 245 210" 
         fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
   
-  <text x="200" y="320" font-family="'IBM Plex Mono', monospace" font-size="48" font-weight="600" fill="#1C1C1C" text-anchor="middle" letter-spacing="4">ZKIR</text>
-  <text x="200" y="350" font-family="'IBM Plex Mono', monospace" font-size="10" font-weight="500" fill="#6B7280" text-anchor="middle" letter-spacing="3">ZERO-KNOWLEDGE BYTECODE</text>
+  <text x="200" y="320" font-family="'IBM Plex Mono', monospace" font-size="36" font-weight="600" fill="#1C1C1C" text-anchor="middle" letter-spacing="2">ZKIR</text>
+  <text x="200" y="345" font-family="'IBM Plex Mono', monospace" font-size="10" font-weight="500" fill="#6B7280" text-anchor="middle" letter-spacing="3">ZERO-KNOWLEDGE BYTECODE</text>
 </svg>

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="zkir.svg" alt="HPCrypt Logo" width="400">
+  <img src="zkir.svg" alt="zkir Logo" width="400">
 </p>
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17747636.svg)](https://doi.org/10.5281/zenodo.17747636)
