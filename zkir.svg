@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="seceqGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#00b4d8"/>
+      <stop offset="100%" style="stop-color:#023e8a"/>
+    </linearGradient>
+  </defs>
+  
+  <rect width="400" height="400" fill="#FFFFFF"/>
+  
+  <!-- Rounded square container -->
+  <rect x="80" y="45" width="240" height="220" rx="45" fill="url(#seceqGrad)"/>
+  
+  <!-- Left curly brace - moved closer -->
+  <path d="M 155 100 Q 140 100 140 120 L 140 145 Q 140 155 130 155 Q 140 155 140 165 L 140 190 Q 140 210 155 210" 
+        fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+  
+  <!-- Central binary -->
+  <g fill="#FFFFFF" font-family="'IBM Plex Mono', monospace" font-size="44" font-weight="700" text-anchor="middle">
+    <text x="200" y="145">01</text>
+    <text x="200" y="195">10</text>
+  </g>
+  
+  <!-- Right curly brace - moved closer -->
+  <path d="M 245 100 Q 260 100 260 120 L 260 145 Q 260 155 270 155 Q 260 155 260 165 L 260 190 Q 260 210 245 210" 
+        fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+  
+  <text x="200" y="320" font-family="'IBM Plex Mono', monospace" font-size="48" font-weight="600" fill="#1C1C1C" text-anchor="middle" letter-spacing="4">ZKIR</text>
+  <text x="200" y="350" font-family="'IBM Plex Mono', monospace" font-size="10" font-weight="500" fill="#6B7280" text-anchor="middle" letter-spacing="3">ZERO-KNOWLEDGE BYTECODE</text>
+</svg>
