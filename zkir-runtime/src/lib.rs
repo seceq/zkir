@@ -6,8 +6,9 @@ pub mod vm;
 pub mod state;
 pub mod memory;
 pub mod io;
-pub mod decode;
 pub mod error;
+pub mod execute;
+pub mod syscall;
 
 pub use vm::{VM, VMConfig, ExecutionResult};
 pub use state::{VMState, HaltReason};

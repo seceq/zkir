@@ -121,9 +121,9 @@ mod tests {
     #[test]
     fn test_format_add() {
         let instr = Instruction::Add {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
+            rd: Register::R10,
+            rs1: Register::R11,
+            rs2: Register::R12,
         };
         assert_eq!(format(&instr), "add a0, a1, a2");
     }

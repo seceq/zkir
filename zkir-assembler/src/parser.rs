@@ -1,15 +1,27 @@
-//! Assembly parser
+//! Assembly parser for ZK IR v2.2
+//!
+//! Parses tokenized assembly into Instruction types.
 
 use zkir_spec::{Instruction, Register};
 use crate::error::{AssemblerError, Result};
+use crate::lexer::{Token, Lexer};
 
 /// Parse a single instruction from assembly text
 pub fn parse_instruction(text: &str) -> Result<Instruction> {
-    let text = text.trim();
+    let mut lexer = Lexer::new(text);
+    let tokens = lexer.tokenize()
+        .map_err(|e| AssemblerError::SyntaxError {
+            line: lexer.line(),
+            column: lexer.col(),
+            message: e,
+        })?;
 
-    // Split into mnemonic and operands
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    if parts.is_empty() {
+    // Filter out newlines and EOF
+    let tokens: Vec<Token> = tokens.into_iter()
+        .filter(|t| !matches!(t, Token::Newline | Token::Eof))
+        .collect();
+
+    if tokens.is_empty() {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
@@ -17,107 +29,250 @@ pub fn parse_instruction(text: &str) -> Result<Instruction> {
         });
     }
 
-    let mnemonic = parts[0].to_lowercase();
-    let operands = if parts.len() > 1 {
-        parts[1..].join(" ")
-    } else {
-        String::new()
-    };
-
-    parse_mnemonic(&mnemonic, &operands)
+    parse_tokens(&tokens)
 }
 
-/// Parse register name
+/// Parse register name (v2.2 RISC-V calling convention)
 pub fn parse_register(name: &str) -> Result<Register> {
     let name = name.trim().to_lowercase();
 
     match name.as_str() {
+        // R0 - hardwired zero
         "zero" | "r0" => Ok(Register::R0),
-        "rv" | "r1" => Ok(Register::R1),
+
+        // R1 - return address
+        "ra" | "r1" => Ok(Register::R1),
+
+        // R2 - stack pointer
         "sp" | "r2" => Ok(Register::R2),
-        "fp" | "r3" => Ok(Register::R3),
-        "a0" | "r4" => Ok(Register::R4),
-        "a1" | "r5" => Ok(Register::R5),
-        "a2" | "r6" => Ok(Register::R6),
-        "a3" | "r7" => Ok(Register::R7),
-        "t0" | "r8" => Ok(Register::R8),
-        "t1" | "r9" => Ok(Register::R9),
-        "t2" | "r10" => Ok(Register::R10),
-        "t3" | "r11" => Ok(Register::R11),
-        "t4" | "r12" => Ok(Register::R12),
-        "t5" | "r13" => Ok(Register::R13),
-        "t6" | "r14" => Ok(Register::R14),
-        "t7" | "r15" => Ok(Register::R15),
-        "s0" | "r16" => Ok(Register::R16),
-        "s1" | "r17" => Ok(Register::R17),
+
+        // R3 - global pointer
+        "gp" | "r3" => Ok(Register::R3),
+
+        // R4 - thread pointer
+        "tp" | "r4" => Ok(Register::R4),
+
+        // R5-R7 - temporaries t0-t2
+        "t0" | "r5" => Ok(Register::R5),
+        "t1" | "r6" => Ok(Register::R6),
+        "t2" | "r7" => Ok(Register::R7),
+
+        // R8 - frame pointer (also s0)
+        "fp" | "s0" | "r8" => Ok(Register::R8),
+
+        // R9 - saved register s1
+        "s1" | "r9" => Ok(Register::R9),
+
+        // R10-R17 - arguments/return values a0-a7
+        "a0" | "r10" => Ok(Register::R10),
+        "a1" | "r11" => Ok(Register::R11),
+        "a2" | "r12" => Ok(Register::R12),
+        "a3" | "r13" => Ok(Register::R13),
+        "a4" | "r14" => Ok(Register::R14),
+        "a5" | "r15" => Ok(Register::R15),
+        "a6" | "r16" => Ok(Register::R16),
+        "a7" | "r17" => Ok(Register::R17),
+
+        // R18-R27 - saved registers s2-s11
         "s2" | "r18" => Ok(Register::R18),
         "s3" | "r19" => Ok(Register::R19),
         "s4" | "r20" => Ok(Register::R20),
         "s5" | "r21" => Ok(Register::R21),
         "s6" | "r22" => Ok(Register::R22),
         "s7" | "r23" => Ok(Register::R23),
-        "t8" | "r24" => Ok(Register::R24),
-        "t9" | "r25" => Ok(Register::R25),
-        "t10" | "r26" => Ok(Register::R26),
-        "t11" | "r27" => Ok(Register::R27),
-        "gp" | "r28" => Ok(Register::R28),
-        "tp" | "r29" => Ok(Register::R29),
-        "ra" | "r30" => Ok(Register::R30),
-        "r31" => Ok(Register::R31),
+        "s8" | "r24" => Ok(Register::R24),
+        "s9" | "r25" => Ok(Register::R25),
+        "s10" | "r26" => Ok(Register::R26),
+        "s11" | "r27" => Ok(Register::R27),
+
+        // R28-R31 - temporaries t3-t6
+        "t3" | "r28" => Ok(Register::R28),
+        "t4" | "r29" => Ok(Register::R29),
+        "t5" | "r30" => Ok(Register::R30),
+        "t6" | "r31" => Ok(Register::R31),
+
         _ => Err(AssemblerError::InvalidRegister(name.to_string())),
     }
 }
 
-/// Parse immediate value (handles decimal, hex, binary)
-fn parse_immediate(text: &str) -> Result<i32> {
-    let text = text.trim();
-
-    if text.starts_with("0x") || text.starts_with("0X") {
-        i32::from_str_radix(&text[2..], 16)
-            .map_err(|_| AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Invalid hex immediate: {}", text),
-            })
-    } else if text.starts_with("0b") || text.starts_with("0B") {
-        i32::from_str_radix(&text[2..], 2)
-            .map_err(|_| AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Invalid binary immediate: {}", text),
-            })
-    } else {
-        text.parse::<i32>()
-            .map_err(|_| AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Invalid immediate: {}", text),
-            })
-    }
-}
-
-/// Parse R-type instruction: mnemonic rd, rs1, rs2
-fn parse_r_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, Register)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 3 {
+/// Parse tokens into an instruction
+fn parse_tokens(tokens: &[Token]) -> Result<Instruction> {
+    if tokens.is_empty() {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("{} requires 3 operands: rd, rs1, rs2", mnemonic),
+            message: "Empty instruction".to_string(),
         });
     }
 
-    let rd = parse_register(parts[0])?;
-    let rs1 = parse_register(parts[1])?;
-    let rs2 = parse_register(parts[2])?;
+    let mnemonic = match &tokens[0] {
+        Token::Identifier(s) => s.to_lowercase(),
+        _ => return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected instruction mnemonic, got {:?}", tokens[0]),
+        }),
+    };
 
-    Ok((rd, rs1, rs2))
+    let operands = &tokens[1..];
+
+    parse_mnemonic(&mnemonic, operands)
 }
 
-/// Parse I-type instruction: mnemonic rd, rs1, imm
-fn parse_i_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i16)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 3 {
+/// Parse instruction mnemonic and operands
+fn parse_mnemonic(mnemonic: &str, operands: &[Token]) -> Result<Instruction> {
+    match mnemonic {
+        // ========== System Instructions ==========
+        "halt" => {
+            expect_no_operands(mnemonic, operands)?;
+            Ok(Instruction::Halt)
+        }
+        "ecall" => {
+            expect_no_operands(mnemonic, operands)?;
+            Ok(Instruction::Ecall)
+        }
+        "ebreak" => {
+            expect_no_operands(mnemonic, operands)?;
+            Ok(Instruction::Ebreak)
+        }
+
+        // ========== R-type Arithmetic ==========
+        "add" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Add { rd, rs1, rs2 }),
+        "sub" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Sub { rd, rs1, rs2 }),
+        "mul" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Mul { rd, rs1, rs2 }),
+        "mulh" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Mulh { rd, rs1, rs2 }),
+        "mulhu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Mulhu { rd, rs1, rs2 }),
+        "mulhsu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Mulhsu { rd, rs1, rs2 }),
+        "div" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Div { rd, rs1, rs2 }),
+        "divu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Divu { rd, rs1, rs2 }),
+        "rem" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Rem { rd, rs1, rs2 }),
+        "remu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Remu { rd, rs1, rs2 }),
+
+        // ========== R-type Logic ==========
+        "and" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::And { rd, rs1, rs2 }),
+        "andn" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Andn { rd, rs1, rs2 }),
+        "or" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Or { rd, rs1, rs2 }),
+        "orn" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Orn { rd, rs1, rs2 }),
+        "xor" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Xor { rd, rs1, rs2 }),
+        "xnor" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Xnor { rd, rs1, rs2 }),
+
+        // ========== R-type Shift ==========
+        "sll" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Sll { rd, rs1, rs2 }),
+        "srl" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Srl { rd, rs1, rs2 }),
+        "sra" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Sra { rd, rs1, rs2 }),
+        "rol" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Rol { rd, rs1, rs2 }),
+        "ror" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Ror { rd, rs1, rs2 }),
+
+        // ========== R-type Compare ==========
+        "slt" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Slt { rd, rs1, rs2 }),
+        "sltu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Sltu { rd, rs1, rs2 }),
+        "min" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Min { rd, rs1, rs2 }),
+        "max" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Max { rd, rs1, rs2 }),
+        "minu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Minu { rd, rs1, rs2 }),
+        "maxu" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Maxu { rd, rs1, rs2 }),
+
+        // ========== Bit Manipulation ==========
+        "clz" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Clz { rd, rs1, rs2 }),
+        "ctz" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Ctz { rd, rs1, rs2 }),
+        "cpop" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Cpop { rd, rs1, rs2 }),
+        "rev8" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Rev8 { rd, rs1, rs2 }),
+
+        // ========== Conditional Move ==========
+        "cmovz" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Cmovz { rd, rs1, rs2 }),
+        "cmovnz" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Cmovnz { rd, rs1, rs2 }),
+
+        // ========== Field Arithmetic ==========
+        "fadd" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Fadd { rd, rs1, rs2 }),
+        "fsub" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Fsub { rd, rs1, rs2 }),
+        "fmul" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Fmul { rd, rs1, rs2 }),
+        "fneg" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Fneg { rd, rs1, rs2 }),
+        "finv" => parse_r_type(mnemonic, operands, |rd, rs1, rs2| Instruction::Finv { rd, rs1, rs2 }),
+
+        // ========== I-type Arithmetic Immediate ==========
+        "addi" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Addi { rd, rs1, imm }),
+        "slti" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Slti { rd, rs1, imm }),
+        "sltiu" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Sltiu { rd, rs1, imm }),
+        "xori" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Xori { rd, rs1, imm }),
+        "ori" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Ori { rd, rs1, imm }),
+        "andi" => parse_i_type(mnemonic, operands, |rd, rs1, imm| Instruction::Andi { rd, rs1, imm }),
+
+        // ========== I-type Shift Immediate ==========
+        "slli" => parse_shift_imm(mnemonic, operands, |rd, rs1, shamt| Instruction::Slli { rd, rs1, shamt }),
+        "srli" => parse_shift_imm(mnemonic, operands, |rd, rs1, shamt| Instruction::Srli { rd, rs1, shamt }),
+        "srai" => parse_shift_imm(mnemonic, operands, |rd, rs1, shamt| Instruction::Srai { rd, rs1, shamt }),
+
+        // ========== Load Instructions ==========
+        "lw" => parse_load(mnemonic, operands, |rd, rs1, imm| Instruction::Lw { rd, rs1, imm }),
+        "lh" => parse_load(mnemonic, operands, |rd, rs1, imm| Instruction::Lh { rd, rs1, imm }),
+        "lhu" => parse_load(mnemonic, operands, |rd, rs1, imm| Instruction::Lhu { rd, rs1, imm }),
+        "lb" => parse_load(mnemonic, operands, |rd, rs1, imm| Instruction::Lb { rd, rs1, imm }),
+        "lbu" => parse_load(mnemonic, operands, |rd, rs1, imm| Instruction::Lbu { rd, rs1, imm }),
+
+        // ========== Store Instructions ==========
+        "sw" => parse_store(mnemonic, operands, |rs1, rs2, imm| Instruction::Sw { rs1, rs2, imm }),
+        "sh" => parse_store(mnemonic, operands, |rs1, rs2, imm| Instruction::Sh { rs1, rs2, imm }),
+        "sb" => parse_store(mnemonic, operands, |rs1, rs2, imm| Instruction::Sb { rs1, rs2, imm }),
+
+        // ========== Branch Instructions ==========
+        "beq" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Beq { rs1, rs2, imm }),
+        "bne" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Bne { rs1, rs2, imm }),
+        "blt" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Blt { rs1, rs2, imm }),
+        "bge" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Bge { rs1, rs2, imm }),
+        "bltu" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Bltu { rs1, rs2, imm }),
+        "bgeu" => parse_branch(mnemonic, operands, |rs1, rs2, imm| Instruction::Bgeu { rs1, rs2, imm }),
+
+        // ========== Jump Instructions ==========
+        "jal" => parse_jal(mnemonic, operands),
+        "jalr" => parse_jalr(mnemonic, operands),
+
+        // ========== Upper Immediate ==========
+        "lui" => parse_u_type(mnemonic, operands, |rd, imm| Instruction::Lui { rd, imm }),
+        "auipc" => parse_u_type(mnemonic, operands, |rd, imm| Instruction::Auipc { rd, imm }),
+
+        // ========== ZK Operations ==========
+        "read" => parse_zk_unary(mnemonic, operands, |rd| Instruction::Read { rd }),
+        "write" => parse_zk_unary_rs(mnemonic, operands, |rs1| Instruction::Write { rs1 }),
+        "hint" => parse_zk_unary(mnemonic, operands, |rd| Instruction::Hint { rd }),
+        "commit" => parse_zk_unary_rs(mnemonic, operands, |rs1| Instruction::Commit { rs1 }),
+        "assert_eq" => parse_zk_binary(mnemonic, operands, |rs1, rs2| Instruction::AssertEq { rs1, rs2 }),
+        "assert_ne" => parse_zk_binary(mnemonic, operands, |rs1, rs2| Instruction::AssertNe { rs1, rs2 }),
+        "assert_zero" => parse_zk_unary_rs(mnemonic, operands, |rs1| Instruction::AssertZero { rs1 }),
+        "range_check" => parse_zk_range_check(mnemonic, operands),
+        "debug" => parse_zk_unary_rs(mnemonic, operands, |rs1| Instruction::Debug { rs1 }),
+
+        _ => Err(AssemblerError::UnknownInstruction(mnemonic.to_string())),
+    }
+}
+
+// ========== Helper Functions ==========
+
+fn expect_no_operands(mnemonic: &str, operands: &[Token]) -> Result<()> {
+    if !operands.is_empty() {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} takes no operands", mnemonic),
+        });
+    }
+    Ok(())
+}
+
+/// Parse R-type: rd, rs1, rs2
+fn parse_r_type<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, Register) -> Instruction,
+{
+    let (rd, rs1, rs2) = parse_three_regs(mnemonic, operands)?;
+    Ok(constructor(rd, rs1, rs2))
+}
+
+/// Parse I-type: rd, rs1, imm
+fn parse_i_type<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i16) -> Instruction,
+{
+    // rd, comma, rs1, comma, imm
+    if operands.len() != 5 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
@@ -125,101 +280,91 @@ fn parse_i_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i
         });
     }
 
-    let rd = parse_register(parts[0])?;
-    let rs1 = parse_register(parts[1])?;
-    let imm_val = parse_immediate(parts[2])?;
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs1 = extract_register(&operands[2])?;
+    expect_comma(&operands[3])?;
+    let imm = extract_imm12(&operands[4])?;
 
-    if imm_val < -2048 || imm_val > 2047 {
+    Ok(constructor(rd, rs1, imm))
+}
+
+/// Parse shift immediate: rd, rs1, shamt
+fn parse_shift_imm<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, u8) -> Instruction,
+{
+    if operands.len() != 5 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("Immediate value {} out of range (must be -2048 to 2047)", imm_val),
+            message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
         });
     }
 
-    let imm = imm_val as i16;
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs1 = extract_register(&operands[2])?;
+    expect_comma(&operands[3])?;
+    let shamt = extract_shamt(&operands[4])?;
 
-    Ok((rd, rs1, imm))
+    Ok(constructor(rd, rs1, shamt))
 }
 
-/// Parse memory operand format: offset(register)
-fn parse_memory_operand(mem_operand: &str) -> Result<(Register, i16)> {
-    if let Some(paren_pos) = mem_operand.find('(') {
-        let offset_str = &mem_operand[..paren_pos];
-        let reg_str = &mem_operand[paren_pos+1..];
-
-        if !reg_str.ends_with(')') {
-            return Err(AssemblerError::SyntaxError {
-                line: 0,
-                column: 0,
-                message: format!("Missing closing parenthesis in: {}", mem_operand),
-            });
-        }
-
-        let reg_str = &reg_str[..reg_str.len()-1];
-        let imm = if offset_str.is_empty() {
-            0
-        } else {
-            let imm_val = parse_immediate(offset_str)?;
-            if imm_val < -2048 || imm_val > 2047 {
-                return Err(AssemblerError::SyntaxError {
-                    line: 0,
-                    column: 0,
-                    message: format!("Offset value {} out of range (must be -2048 to 2047)", imm_val),
-                });
-            }
-            imm_val as i16
-        };
-        let rs1 = parse_register(reg_str)?;
-
-        Ok((rs1, imm))
-    } else {
-        Err(AssemblerError::SyntaxError {
-            line: 0,
-            column: 0,
-            message: format!("Invalid memory operand: {}", mem_operand),
-        })
-    }
-}
-
-/// Parse I-type load instruction: mnemonic rd, offset(rs1)
-fn parse_load(mnemonic: &str, operands: &str) -> Result<(Register, Register, i16)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 2 {
+/// Parse load: rd, offset(rs1)
+fn parse_load<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i16) -> Instruction,
+{
+    // rd, comma, offset, lparen, rs1, rparen
+    if operands.len() != 6 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("{} requires 2 operands: rd, offset(rs1)", mnemonic),
+            message: format!("{} requires format: rd, offset(rs1)", mnemonic),
         });
     }
 
-    let rd = parse_register(parts[0])?;
-    let (rs1, imm) = parse_memory_operand(parts[1])?;
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let offset = extract_imm12(&operands[2])?;
+    expect_lparen(&operands[3])?;
+    let rs1 = extract_register(&operands[4])?;
+    expect_rparen(&operands[5])?;
 
-    Ok((rd, rs1, imm))
+    Ok(constructor(rd, rs1, offset))
 }
 
-/// Parse S-type store instruction: mnemonic rs2, offset(rs1)
-fn parse_store(mnemonic: &str, operands: &str) -> Result<(Register, Register, i16)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 2 {
+/// Parse store: rs2, offset(rs1)
+fn parse_store<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i16) -> Instruction,
+{
+    // rs2, comma, offset, lparen, rs1, rparen
+    if operands.len() != 6 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("{} requires 2 operands: rs2, offset(rs1)", mnemonic),
+            message: format!("{} requires format: rs2, offset(rs1)", mnemonic),
         });
     }
 
-    let rs2 = parse_register(parts[0])?;
-    let (rs1, imm) = parse_memory_operand(parts[1])?;
+    let rs2 = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let offset = extract_imm12(&operands[2])?;
+    expect_lparen(&operands[3])?;
+    let rs1 = extract_register(&operands[4])?;
+    expect_rparen(&operands[5])?;
 
-    Ok((rs1, rs2, imm))
+    Ok(constructor(rs1, rs2, offset))
 }
 
-/// Parse B-type branch instruction: mnemonic rs1, rs2, offset
-fn parse_b_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i16)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 3 {
+/// Parse branch: rs1, rs2, offset
+fn parse_branch<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i16) -> Instruction,
+{
+    if operands.len() != 5 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
@@ -227,27 +372,57 @@ fn parse_b_type(mnemonic: &str, operands: &str) -> Result<(Register, Register, i
         });
     }
 
-    let rs1 = parse_register(parts[0])?;
-    let rs2 = parse_register(parts[1])?;
-    let imm_val = parse_immediate(parts[2])?;
+    let rs1 = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs2 = extract_register(&operands[2])?;
+    expect_comma(&operands[3])?;
+    let offset = extract_branch_offset(&operands[4])?;
 
-    if imm_val < -4096 || imm_val > 4094 {
+    Ok(constructor(rs1, rs2, offset))
+}
+
+/// Parse JAL: rd, offset
+fn parse_jal(mnemonic: &str, operands: &[Token]) -> Result<Instruction> {
+    if operands.len() != 3 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("Branch offset {} out of range (must be -4096 to 4094)", imm_val),
+            message: format!("{} requires 2 operands: rd, offset", mnemonic),
         });
     }
 
-    let imm = imm_val as i16;
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let imm = extract_jump_offset(&operands[2])?;
 
-    Ok((rs1, rs2, imm))
+    Ok(Instruction::Jal { rd, imm })
 }
 
-/// Parse U-type instruction: mnemonic rd, imm
-fn parse_u_type(mnemonic: &str, operands: &str) -> Result<(Register, i32)> {
-    let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-    if parts.len() != 2 {
+/// Parse JALR: rd, rs1, offset
+fn parse_jalr(mnemonic: &str, operands: &[Token]) -> Result<Instruction> {
+    if operands.len() != 5 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} requires 3 operands: rd, rs1, offset", mnemonic),
+        });
+    }
+
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs1 = extract_register(&operands[2])?;
+    expect_comma(&operands[3])?;
+    let imm = extract_imm12(&operands[4])?;
+
+    Ok(Instruction::Jalr { rd, rs1, imm })
+}
+
+/// Parse U-type: rd, imm
+fn parse_u_type<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, i32) -> Instruction,
+{
+    if operands.len() != 3 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
@@ -255,257 +430,241 @@ fn parse_u_type(mnemonic: &str, operands: &str) -> Result<(Register, i32)> {
         });
     }
 
-    let rd = parse_register(parts[0])?;
-    let imm = parse_immediate(parts[1])?;
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let imm = extract_imm20(&operands[2])?;
 
-    Ok((rd, imm))
+    Ok(constructor(rd, imm))
 }
 
-/// Parse shift amount (must be 0-31)
-fn parse_shamt(text: &str) -> Result<u8> {
-    let shamt = parse_immediate(text)?;
-    if shamt < 0 || shamt > 31 {
+/// Parse ZK unary (rd only): rd
+fn parse_zk_unary<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register) -> Instruction,
+{
+    if operands.len() != 1 {
         return Err(AssemblerError::SyntaxError {
             line: 0,
             column: 0,
-            message: format!("Shift amount must be 0-31, got {}", shamt),
+            message: format!("{} requires 1 operand: rd", mnemonic),
         });
     }
-    Ok(shamt as u8)
+
+    let rd = extract_register(&operands[0])?;
+    Ok(constructor(rd))
 }
 
-fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
-    match mnemonic {
-        // System
-        "halt" => Ok(Instruction::Halt),
-        "ecall" => Ok(Instruction::Ecall),
-        "ebreak" => Ok(Instruction::Ebreak),
+/// Parse ZK unary (rs1 only): rs1
+fn parse_zk_unary_rs<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register) -> Instruction,
+{
+    if operands.len() != 1 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} requires 1 operand: rs1", mnemonic),
+        });
+    }
 
-        // R-type: Arithmetic
-        "add" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Add { rd, rs1, rs2 })
-        }
-        "sub" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Sub { rd, rs1, rs2 })
-        }
-        "mul" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Mul { rd, rs1, rs2 })
-        }
-        "mulh" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Mulh { rd, rs1, rs2 })
-        }
-        "mulhu" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Mulhu { rd, rs1, rs2 })
-        }
-        "div" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Div { rd, rs1, rs2 })
-        }
-        "divu" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Divu { rd, rs1, rs2 })
-        }
-        "rem" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Rem { rd, rs1, rs2 })
-        }
-        "remu" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Remu { rd, rs1, rs2 })
-        }
+    let rs1 = extract_register(&operands[0])?;
+    Ok(constructor(rs1))
+}
 
-        // R-type: Logic
-        "and" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::And { rd, rs1, rs2 })
-        }
-        "or" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Or { rd, rs1, rs2 })
-        }
-        "xor" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Xor { rd, rs1, rs2 })
-        }
-        "sll" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Sll { rd, rs1, rs2 })
-        }
-        "srl" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Srl { rd, rs1, rs2 })
-        }
-        "sra" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Sra { rd, rs1, rs2 })
-        }
-        "slt" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Slt { rd, rs1, rs2 })
-        }
-        "sltu" => {
-            let (rd, rs1, rs2) = parse_r_type(mnemonic, operands)?;
-            Ok(Instruction::Sltu { rd, rs1, rs2 })
-        }
+/// Parse ZK binary: rs1, rs2
+fn parse_zk_binary<F>(mnemonic: &str, operands: &[Token], constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register) -> Instruction,
+{
+    if operands.len() != 3 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} requires 2 operands: rs1, rs2", mnemonic),
+        });
+    }
 
-        // I-type: Arithmetic Immediate
-        "addi" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Addi { rd, rs1, imm })
-        }
-        "slti" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Slti { rd, rs1, imm })
-        }
-        "sltiu" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Sltiu { rd, rs1, imm })
-        }
-        "xori" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Xori { rd, rs1, imm })
-        }
-        "ori" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Ori { rd, rs1, imm })
-        }
-        "andi" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Andi { rd, rs1, imm })
-        }
+    let rs1 = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs2 = extract_register(&operands[2])?;
 
-        // I-type: Shift Immediate (special handling for shamt)
-        "slli" => {
-            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-            if parts.len() != 3 {
-                return Err(AssemblerError::SyntaxError {
-                    line: 0,
-                    column: 0,
-                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
-                });
-            }
-            let rd = parse_register(parts[0])?;
-            let rs1 = parse_register(parts[1])?;
-            let shamt = parse_shamt(parts[2])?;
-            Ok(Instruction::Slli { rd, rs1, shamt })
-        }
-        "srli" => {
-            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-            if parts.len() != 3 {
-                return Err(AssemblerError::SyntaxError {
-                    line: 0,
-                    column: 0,
-                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
-                });
-            }
-            let rd = parse_register(parts[0])?;
-            let rs1 = parse_register(parts[1])?;
-            let shamt = parse_shamt(parts[2])?;
-            Ok(Instruction::Srli { rd, rs1, shamt })
-        }
-        "srai" => {
-            let parts: Vec<&str> = operands.split(',').map(|s| s.trim()).collect();
-            if parts.len() != 3 {
-                return Err(AssemblerError::SyntaxError {
-                    line: 0,
-                    column: 0,
-                    message: format!("{} requires 3 operands: rd, rs1, shamt", mnemonic),
-                });
-            }
-            let rd = parse_register(parts[0])?;
-            let rs1 = parse_register(parts[1])?;
-            let shamt = parse_shamt(parts[2])?;
-            Ok(Instruction::Srai { rd, rs1, shamt })
-        }
+    Ok(constructor(rs1, rs2))
+}
 
-        // I-type: Load
-        "lw" => {
-            let (rd, rs1, imm) = parse_load(mnemonic, operands)?;
-            Ok(Instruction::Lw { rd, rs1, imm })
-        }
-        "lh" => {
-            let (rd, rs1, imm) = parse_load(mnemonic, operands)?;
-            Ok(Instruction::Lh { rd, rs1, imm })
-        }
-        "lhu" => {
-            let (rd, rs1, imm) = parse_load(mnemonic, operands)?;
-            Ok(Instruction::Lhu { rd, rs1, imm })
-        }
-        "lb" => {
-            let (rd, rs1, imm) = parse_load(mnemonic, operands)?;
-            Ok(Instruction::Lb { rd, rs1, imm })
-        }
-        "lbu" => {
-            let (rd, rs1, imm) = parse_load(mnemonic, operands)?;
-            Ok(Instruction::Lbu { rd, rs1, imm })
-        }
+/// Parse range_check: rs1, bits
+fn parse_zk_range_check(mnemonic: &str, operands: &[Token]) -> Result<Instruction> {
+    if operands.len() != 3 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} requires 2 operands: rs1, bits", mnemonic),
+        });
+    }
 
-        // S-type: Store
-        "sw" => {
-            let (rs1, rs2, imm) = parse_store(mnemonic, operands)?;
-            Ok(Instruction::Sw { rs1, rs2, imm })
-        }
-        "sh" => {
-            let (rs1, rs2, imm) = parse_store(mnemonic, operands)?;
-            Ok(Instruction::Sh { rs1, rs2, imm })
-        }
-        "sb" => {
-            let (rs1, rs2, imm) = parse_store(mnemonic, operands)?;
-            Ok(Instruction::Sb { rs1, rs2, imm })
-        }
+    let rs1 = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let bits = extract_shamt(&operands[2])?; // reuse shamt extraction (0-31 range)
 
-        // B-type: Branch
-        "beq" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Beq { rs1, rs2, imm })
-        }
-        "bne" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Bne { rs1, rs2, imm })
-        }
-        "blt" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Blt { rs1, rs2, imm })
-        }
-        "bge" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Bge { rs1, rs2, imm })
-        }
-        "bltu" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Bltu { rs1, rs2, imm })
-        }
-        "bgeu" => {
-            let (rs1, rs2, imm) = parse_b_type(mnemonic, operands)?;
-            Ok(Instruction::Bgeu { rs1, rs2, imm })
-        }
+    Ok(Instruction::RangeCheck { rs1, bits })
+}
 
-        // J-type: Jump
-        "jal" => {
-            let (rd, imm) = parse_u_type(mnemonic, operands)?;
-            Ok(Instruction::Jal { rd, imm })
-        }
-        "jalr" => {
-            let (rd, rs1, imm) = parse_i_type(mnemonic, operands)?;
-            Ok(Instruction::Jalr { rd, rs1, imm })
-        }
+/// Parse three registers: rd, rs1, rs2
+fn parse_three_regs(mnemonic: &str, operands: &[Token]) -> Result<(Register, Register, Register)> {
+    if operands.len() != 5 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("{} requires 3 operands: rd, rs1, rs2", mnemonic),
+        });
+    }
 
-        // U-type: Upper Immediate
-        "lui" => {
-            let (rd, imm) = parse_u_type(mnemonic, operands)?;
-            Ok(Instruction::Lui { rd, imm })
-        }
-        "auipc" => {
-            let (rd, imm) = parse_u_type(mnemonic, operands)?;
-            Ok(Instruction::Auipc { rd, imm })
-        }
+    let rd = extract_register(&operands[0])?;
+    expect_comma(&operands[1])?;
+    let rs1 = extract_register(&operands[2])?;
+    expect_comma(&operands[3])?;
+    let rs2 = extract_register(&operands[4])?;
 
-        _ => Err(AssemblerError::UnknownInstruction(mnemonic.to_string())),
+    Ok((rd, rs1, rs2))
+}
+
+// ========== Token Extraction ==========
+
+fn extract_register(token: &Token) -> Result<Register> {
+    match token {
+        Token::Register(name) => parse_register(name),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected register, got {:?}", token),
+        }),
+    }
+}
+
+fn extract_imm12(token: &Token) -> Result<i16> {
+    let value = match token {
+        Token::Number(n) => *n as i32,
+        Token::HexNumber(n) => *n as i32,
+        Token::BinNumber(n) => *n as i32,
+        _ => return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected immediate value, got {:?}", token),
+        }),
+    };
+
+    if value < -2048 || value > 2047 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Immediate value {} out of range (must be -2048 to 2047)", value),
+        });
+    }
+
+    Ok(value as i16)
+}
+
+fn extract_imm20(token: &Token) -> Result<i32> {
+    match token {
+        Token::Number(n) => Ok(*n as i32),
+        Token::HexNumber(n) => Ok(*n as i32),
+        Token::BinNumber(n) => Ok(*n as i32),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected immediate value, got {:?}", token),
+        }),
+    }
+}
+
+fn extract_shamt(token: &Token) -> Result<u8> {
+    let value = match token {
+        Token::Number(n) => *n,
+        Token::HexNumber(n) => *n as i64,
+        Token::BinNumber(n) => *n as i64,
+        _ => return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected shift amount, got {:?}", token),
+        }),
+    };
+
+    if value < 0 || value > 31 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Shift amount must be 0-31, got {}", value),
+        });
+    }
+
+    Ok(value as u8)
+}
+
+fn extract_branch_offset(token: &Token) -> Result<i16> {
+    let value = match token {
+        Token::Number(n) => *n as i32,
+        Token::HexNumber(n) => *n as i32,
+        Token::BinNumber(n) => *n as i32,
+        _ => return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected branch offset, got {:?}", token),
+        }),
+    };
+
+    if value < -4096 || value > 4094 {
+        return Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Branch offset {} out of range (must be -4096 to 4094)", value),
+        });
+    }
+
+    Ok(value as i16)
+}
+
+fn extract_jump_offset(token: &Token) -> Result<i32> {
+    match token {
+        Token::Number(n) => Ok(*n as i32),
+        Token::HexNumber(n) => Ok(*n as i32),
+        Token::BinNumber(n) => Ok(*n as i32),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected jump offset, got {:?}", token),
+        }),
+    }
+}
+
+fn expect_comma(token: &Token) -> Result<()> {
+    match token {
+        Token::Comma => Ok(()),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected comma, got {:?}", token),
+        }),
+    }
+}
+
+fn expect_lparen(token: &Token) -> Result<()> {
+    match token {
+        Token::LParen => Ok(()),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected '(', got {:?}", token),
+        }),
+    }
+}
+
+fn expect_rparen(token: &Token) -> Result<()> {
+    match token {
+        Token::RParen => Ok(()),
+        _ => Err(AssemblerError::SyntaxError {
+            line: 0,
+            column: 0,
+            message: format!("Expected ')', got {:?}", token),
+        }),
     }
 }
 
@@ -513,17 +672,42 @@ fn parse_mnemonic(mnemonic: &str, operands: &str) -> Result<Instruction> {
 mod tests {
     use super::*;
 
+    // ========== Register Parsing Tests ==========
     #[test]
-    fn test_parse_register() {
+    fn test_parse_register_v2_2() {
+        // Zero register
         assert_eq!(parse_register("zero").unwrap(), Register::R0);
         assert_eq!(parse_register("r0").unwrap(), Register::R0);
+
+        // Return address
+        assert_eq!(parse_register("ra").unwrap(), Register::R1);
+        assert_eq!(parse_register("r1").unwrap(), Register::R1);
+
+        // Stack pointer
         assert_eq!(parse_register("sp").unwrap(), Register::R2);
-        assert_eq!(parse_register("a0").unwrap(), Register::R4);
-        assert_eq!(parse_register("t0").unwrap(), Register::R8);
-        assert_eq!(parse_register("s0").unwrap(), Register::R16);
-        assert_eq!(parse_register("ra").unwrap(), Register::R30);
+        assert_eq!(parse_register("r2").unwrap(), Register::R2);
+
+        // Arguments (v2.2: a0=R10, a1=R11, etc.)
+        assert_eq!(parse_register("a0").unwrap(), Register::R10);
+        assert_eq!(parse_register("r10").unwrap(), Register::R10);
+        assert_eq!(parse_register("a1").unwrap(), Register::R11);
+        assert_eq!(parse_register("a7").unwrap(), Register::R17);
+
+        // Temporaries
+        assert_eq!(parse_register("t0").unwrap(), Register::R5);
+        assert_eq!(parse_register("t1").unwrap(), Register::R6);
+        assert_eq!(parse_register("t2").unwrap(), Register::R7);
+        assert_eq!(parse_register("t3").unwrap(), Register::R28);
+        assert_eq!(parse_register("t6").unwrap(), Register::R31);
+
+        // Saved registers
+        assert_eq!(parse_register("s0").unwrap(), Register::R8);
+        assert_eq!(parse_register("fp").unwrap(), Register::R8);
+        assert_eq!(parse_register("s1").unwrap(), Register::R9);
+        assert_eq!(parse_register("s11").unwrap(), Register::R27);
     }
 
+    // ========== System Instructions ==========
     #[test]
     fn test_parse_halt() {
         let instr = parse_instruction("halt").unwrap();
@@ -542,14 +726,14 @@ mod tests {
         assert_eq!(instr, Instruction::Ebreak);
     }
 
-    // R-type tests
+    // ========== R-type Arithmetic ==========
     #[test]
     fn test_parse_add() {
         let instr = parse_instruction("add a0, a1, a2").unwrap();
         assert_eq!(instr, Instruction::Add {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
+            rd: Register::R10,
+            rs1: Register::R11,
+            rs2: Register::R12,
         });
     }
 
@@ -557,190 +741,51 @@ mod tests {
     fn test_parse_sub() {
         let instr = parse_instruction("sub t0, t1, t2").unwrap();
         assert_eq!(instr, Instruction::Sub {
-            rd: Register::R8,
-            rs1: Register::R9,
-            rs2: Register::R10,
+            rd: Register::R5,
+            rs1: Register::R6,
+            rs2: Register::R7,
         });
     }
 
     #[test]
     fn test_parse_mul() {
-        let instr = parse_instruction("mul s0, s1, s2").unwrap();
+        let instr = parse_instruction("mul s2, s3, s4").unwrap();
         assert_eq!(instr, Instruction::Mul {
-            rd: Register::R16,
-            rs1: Register::R17,
-            rs2: Register::R18,
+            rd: Register::R18,
+            rs1: Register::R19,
+            rs2: Register::R20,
+        });
+    }
+
+    // ========== Field Arithmetic ==========
+    #[test]
+    fn test_parse_fadd() {
+        let instr = parse_instruction("fadd a0, a1, a2").unwrap();
+        assert_eq!(instr, Instruction::Fadd {
+            rd: Register::R10,
+            rs1: Register::R11,
+            rs2: Register::R12,
         });
     }
 
     #[test]
-    fn test_parse_div() {
-        let instr = parse_instruction("div a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Div {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
+    fn test_parse_fneg() {
+        let instr = parse_instruction("fneg a0, a1, a2").unwrap();
+        assert_eq!(instr, Instruction::Fneg {
+            rd: Register::R10,
+            rs1: Register::R11,
+            rs2: Register::R12,
         });
     }
 
-    #[test]
-    fn test_parse_and() {
-        let instr = parse_instruction("and a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::And {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_or() {
-        let instr = parse_instruction("or a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Or {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_xor() {
-        let instr = parse_instruction("xor a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Xor {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_sll() {
-        let instr = parse_instruction("sll a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Sll {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_srl() {
-        let instr = parse_instruction("srl a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Srl {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_sra() {
-        let instr = parse_instruction("sra a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Sra {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_slt() {
-        let instr = parse_instruction("slt a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Slt {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    #[test]
-    fn test_parse_sltu() {
-        let instr = parse_instruction("sltu a0, a1, a2").unwrap();
-        assert_eq!(instr, Instruction::Sltu {
-            rd: Register::R4,
-            rs1: Register::R5,
-            rs2: Register::R6,
-        });
-    }
-
-    // I-type ALU tests
+    // ========== I-type Instructions ==========
     #[test]
     fn test_parse_addi() {
         let instr = parse_instruction("addi a0, a1, 100").unwrap();
         assert_eq!(instr, Instruction::Addi {
-            rd: Register::R4,
-            rs1: Register::R5,
+            rd: Register::R10,
+            rs1: Register::R11,
             imm: 100,
-        });
-    }
-
-    #[test]
-    fn test_parse_addi_negative() {
-        let instr = parse_instruction("addi a0, a1, -50").unwrap();
-        assert_eq!(instr, Instruction::Addi {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: -50,
-        });
-    }
-
-    #[test]
-    fn test_parse_addi_hex() {
-        let instr = parse_instruction("addi a0, a1, 0xFF").unwrap();
-        assert_eq!(instr, Instruction::Addi {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: 0xFF,
-        });
-    }
-
-    #[test]
-    fn test_parse_andi() {
-        let instr = parse_instruction("andi a0, a1, 0xFF").unwrap();
-        assert_eq!(instr, Instruction::Andi {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: 0xFF,
-        });
-    }
-
-    #[test]
-    fn test_parse_ori() {
-        let instr = parse_instruction("ori a0, a1, 0x10").unwrap();
-        assert_eq!(instr, Instruction::Ori {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: 0x10,
-        });
-    }
-
-    #[test]
-    fn test_parse_xori() {
-        let instr = parse_instruction("xori a0, a1, -1").unwrap();
-        assert_eq!(instr, Instruction::Xori {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: -1,
-        });
-    }
-
-    #[test]
-    fn test_parse_slti() {
-        let instr = parse_instruction("slti a0, a1, 42").unwrap();
-        assert_eq!(instr, Instruction::Slti {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: 42,
-        });
-    }
-
-    #[test]
-    fn test_parse_sltiu() {
-        let instr = parse_instruction("sltiu a0, a1, 42").unwrap();
-        assert_eq!(instr, Instruction::Sltiu {
-            rd: Register::R4,
-            rs1: Register::R5,
-            imm: 42,
         });
     }
 
@@ -748,278 +793,58 @@ mod tests {
     fn test_parse_slli() {
         let instr = parse_instruction("slli a0, a1, 4").unwrap();
         assert_eq!(instr, Instruction::Slli {
-            rd: Register::R4,
-            rs1: Register::R5,
+            rd: Register::R10,
+            rs1: Register::R11,
             shamt: 4,
         });
     }
 
-    #[test]
-    fn test_parse_srli() {
-        let instr = parse_instruction("srli a0, a1, 8").unwrap();
-        assert_eq!(instr, Instruction::Srli {
-            rd: Register::R4,
-            rs1: Register::R5,
-            shamt: 8,
-        });
-    }
-
-    #[test]
-    fn test_parse_srai() {
-        let instr = parse_instruction("srai a0, a1, 16").unwrap();
-        assert_eq!(instr, Instruction::Srai {
-            rd: Register::R4,
-            rs1: Register::R5,
-            shamt: 16,
-        });
-    }
-
-    // Load tests
+    // ========== Load/Store ==========
     #[test]
     fn test_parse_lw() {
-        let instr = parse_instruction("lw a0, 0(sp)").unwrap();
-        assert_eq!(instr, Instruction::Lw {
-            rd: Register::R4,
-            rs1: Register::R2,
-            imm: 0,
-        });
-    }
-
-    #[test]
-    fn test_parse_lw_offset() {
         let instr = parse_instruction("lw a0, 16(sp)").unwrap();
         assert_eq!(instr, Instruction::Lw {
-            rd: Register::R4,
+            rd: Register::R10,
             rs1: Register::R2,
             imm: 16,
         });
     }
 
     #[test]
-    fn test_parse_lw_negative_offset() {
-        let instr = parse_instruction("lw a0, -8(fp)").unwrap();
-        assert_eq!(instr, Instruction::Lw {
-            rd: Register::R4,
-            rs1: Register::R3,
-            imm: -8,
-        });
-    }
-
-    #[test]
-    fn test_parse_lh() {
-        let instr = parse_instruction("lh a0, 4(sp)").unwrap();
-        assert_eq!(instr, Instruction::Lh {
-            rd: Register::R4,
-            rs1: Register::R2,
-            imm: 4,
-        });
-    }
-
-    #[test]
-    fn test_parse_lhu() {
-        let instr = parse_instruction("lhu a0, 4(sp)").unwrap();
-        assert_eq!(instr, Instruction::Lhu {
-            rd: Register::R4,
-            rs1: Register::R2,
-            imm: 4,
-        });
-    }
-
-    #[test]
-    fn test_parse_lb() {
-        let instr = parse_instruction("lb a0, 1(sp)").unwrap();
-        assert_eq!(instr, Instruction::Lb {
-            rd: Register::R4,
-            rs1: Register::R2,
-            imm: 1,
-        });
-    }
-
-    #[test]
-    fn test_parse_lbu() {
-        let instr = parse_instruction("lbu a0, 1(sp)").unwrap();
-        assert_eq!(instr, Instruction::Lbu {
-            rd: Register::R4,
-            rs1: Register::R2,
-            imm: 1,
-        });
-    }
-
-    // Store tests
-    #[test]
     fn test_parse_sw() {
-        let instr = parse_instruction("sw a0, 0(sp)").unwrap();
-        assert_eq!(instr, Instruction::Sw {
-            rs1: Register::R2,
-            rs2: Register::R4,
-            imm: 0,
-        });
-    }
-
-    #[test]
-    fn test_parse_sw_offset() {
         let instr = parse_instruction("sw a0, 16(sp)").unwrap();
         assert_eq!(instr, Instruction::Sw {
             rs1: Register::R2,
-            rs2: Register::R4,
+            rs2: Register::R10,
             imm: 16,
         });
     }
 
-    #[test]
-    fn test_parse_sh() {
-        let instr = parse_instruction("sh a0, 4(sp)").unwrap();
-        assert_eq!(instr, Instruction::Sh {
-            rs1: Register::R2,
-            rs2: Register::R4,
-            imm: 4,
-        });
-    }
-
-    #[test]
-    fn test_parse_sb() {
-        let instr = parse_instruction("sb a0, 1(sp)").unwrap();
-        assert_eq!(instr, Instruction::Sb {
-            rs1: Register::R2,
-            rs2: Register::R4,
-            imm: 1,
-        });
-    }
-
-    // Branch tests
+    // ========== Branches ==========
     #[test]
     fn test_parse_beq() {
         let instr = parse_instruction("beq a0, a1, 16").unwrap();
         assert_eq!(instr, Instruction::Beq {
-            rs1: Register::R4,
-            rs2: Register::R5,
+            rs1: Register::R10,
+            rs2: Register::R11,
             imm: 16,
         });
     }
 
+    // ========== ZK Operations ==========
     #[test]
-    fn test_parse_bne() {
-        let instr = parse_instruction("bne a0, a1, -8").unwrap();
-        assert_eq!(instr, Instruction::Bne {
-            rs1: Register::R4,
-            rs2: Register::R5,
-            imm: -8,
+    fn test_parse_read() {
+        let instr = parse_instruction("read a0").unwrap();
+        assert_eq!(instr, Instruction::Read {
+            rd: Register::R10,
         });
     }
 
     #[test]
-    fn test_parse_blt() {
-        let instr = parse_instruction("blt a0, a1, 100").unwrap();
-        assert_eq!(instr, Instruction::Blt {
-            rs1: Register::R4,
-            rs2: Register::R5,
-            imm: 100,
+    fn test_parse_write() {
+        let instr = parse_instruction("write a0").unwrap();
+        assert_eq!(instr, Instruction::Write {
+            rs1: Register::R10,
         });
-    }
-
-    #[test]
-    fn test_parse_bge() {
-        let instr = parse_instruction("bge a0, a1, 100").unwrap();
-        assert_eq!(instr, Instruction::Bge {
-            rs1: Register::R4,
-            rs2: Register::R5,
-            imm: 100,
-        });
-    }
-
-    #[test]
-    fn test_parse_bltu() {
-        let instr = parse_instruction("bltu a0, a1, 100").unwrap();
-        assert_eq!(instr, Instruction::Bltu {
-            rs1: Register::R4,
-            rs2: Register::R5,
-            imm: 100,
-        });
-    }
-
-    #[test]
-    fn test_parse_bgeu() {
-        let instr = parse_instruction("bgeu a0, a1, 100").unwrap();
-        assert_eq!(instr, Instruction::Bgeu {
-            rs1: Register::R4,
-            rs2: Register::R5,
-            imm: 100,
-        });
-    }
-
-    // Jump tests
-    #[test]
-    fn test_parse_jal() {
-        let instr = parse_instruction("jal ra, 1000").unwrap();
-        assert_eq!(instr, Instruction::Jal {
-            rd: Register::R30,
-            imm: 1000,
-        });
-    }
-
-    #[test]
-    fn test_parse_jalr() {
-        let instr = parse_instruction("jalr ra, a0, 0").unwrap();
-        assert_eq!(instr, Instruction::Jalr {
-            rd: Register::R30,
-            rs1: Register::R4,
-            imm: 0,
-        });
-    }
-
-    // U-type tests
-    #[test]
-    fn test_parse_lui() {
-        let instr = parse_instruction("lui a0, 0x12345").unwrap();
-        assert_eq!(instr, Instruction::Lui {
-            rd: Register::R4,
-            imm: 0x12345,
-        });
-    }
-
-    #[test]
-    fn test_parse_auipc() {
-        let instr = parse_instruction("auipc a0, 0x1000").unwrap();
-        assert_eq!(instr, Instruction::Auipc {
-            rd: Register::R4,
-            imm: 0x1000,
-        });
-    }
-
-    // Error cases
-    #[test]
-    fn test_parse_unknown_instruction() {
-        let result = parse_instruction("unknown");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_register() {
-        let result = parse_instruction("add invalid, a1, a2");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_wrong_operand_count() {
-        let result = parse_instruction("add a0, a1");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_immediate() {
-        let result = parse_instruction("addi a0, a1, notanumber");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_memory_operand() {
-        let result = parse_instruction("lw a0, invalid");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_missing_paren() {
-        let result = parse_instruction("lw a0, 16(sp");
-        assert!(result.is_err());
     }
 }

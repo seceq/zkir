@@ -8,19 +8,20 @@
 >
 > Mamone Tarsha-Kurdi, SECEQ Research
 
-A 32-bit register-based instruction set and runtime designed for efficient zero-knowledge proof generation with Plonky3.
+A **30-bit native** register-based instruction set and runtime designed for efficient zero-knowledge proof generation with Plonky3.
 
 ## Overview
 
-ZK IR is a RISC-V inspired bytecode format optimized for ZK proof generation. It features a simplified 32-bit architecture with syscalls for cryptographic operations, making it ideal for proving computation with Baby Bear field arithmetic.
+ZK IR v2.2 is a custom bytecode format optimized for ZK proof generation. It features a **30-bit native architecture** where all values fit within the Baby Bear prime field, eliminating the need for range checks on most operations.
 
 **Key Features:**
-- 32-bit RISC-V compatible instruction encoding
-- Baby Bear prime field (p = 2^31 - 2^27 + 1)
-- No field registers (uses syscalls for crypto operations)
-- Register pairs for 64-bit values
+- **30-bit native architecture** - All values ≤ 2^30-1 < Baby Bear prime
+- Custom 30-bit instruction encoding (stored in 32-bit slots)
+- Baby Bear prime field (p = 2^31 - 2^27 + 1 = 2,013,265,921)
+- RISC-V calling convention (ra, sp, a0-a7, s2-s11, etc.)
+- 77 instructions including field arithmetic (FADD, FSUB, FMUL, FNEG, FINV)
 - Minimal constraints per instruction
-- Syscalls for Poseidon2, SHA-256, ECDSA, etc.
+- Syscalls for Poseidon2, SHA-256, memory operations
 
 ```
 Rust Source → LLVM IR → ZK IR → Runtime → Plonky3 Proof
@@ -50,23 +51,26 @@ cargo test --all
 cargo build --all --release
 ```
 
-## Architecture
+## Architecture (v2.2)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    ZK IR Architecture                           │
+│                ZK IR v2.2 - 30-bit Native                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  Integer Registers (32 × 32-bit):                               │
-│  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───────────┐  │
-│  │  r0 │  r1 │  r2 │  r3 │ r4  │ r5  │ r6  │ r7  │ r8-r31    │  │
-│  │ =0  │  rv │  sp │  fp │ a0  │ a1  │ a2  │ a3  │ temp/saved│  │
-│  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───────────┘  │
+│  Registers (32 × 30-bit) - RISC-V Convention:                   │
+│  ┌─────┬─────┬─────┬─────┬─────┬─────┬────────┬──────────────┐  │
+│  │  r0 │  r1 │  r2 │ r3  │ r4  │ r5-7│ r8-r9  │ r10-r31      │  │
+│  │zero │ ra  │ sp  │ gp  │ tp  │t0-t2│ fp, s1 │ a0-a7, s2-s11│  │
+│  └─────┴─────┴─────┴─────┴─────┴─────┴────────┴──────────────┘  │
 │                                                                 │
-│  NO field registers (use syscalls for crypto)                   │
+│  Field Arithmetic Instructions (FADD, FSUB, FMUL, FNEG, FINV)   │
+│  All operations stay within 30-bit (no overflow to check!)      │
 │                                                                 │
-│  Memory: 32-bit addressable, 32-bit words, little-endian        │
-│  Field: Baby Bear (p = 2^31 - 2^27 + 1)                         │
+│  Memory: 30-bit addressable, 30-bit words, Harvard architecture │
+│  Field: Baby Bear (p = 2^31 - 2^27 + 1 = 2,013,265,921)        │
+│                                                                 │
+│  Instructions: 30-bit encoding (bits 31:30 = 0), 4-bit opcodes  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -116,31 +120,38 @@ fib_base:
     ret
 ```
 
-## Instruction Set Overview
+## Instruction Set Overview (77 Instructions)
 
 ### Categories
 
-- **Arithmetic**: add, sub, mul, div, divu, rem, remu, addi, etc.
-- **Logic**: and, or, xor, sll, srl, sra, slt, sltu
-- **Memory**: lw, lh, lb, lhu, lbu, sw, sh, sb
-- **Control Flow**: beq, bne, blt, bge, bltu, bgeu, jal, jalr
-- **Upper Immediate**: lui, auipc
-- **System**: ecall, ebreak
-- **ZK-Custom**: assert_eq, assert_ne, assert_zero, range_check, commit, halt
-- **ZK I/O**: read, write, hint
+- **Arithmetic** (10): add, sub, mul, mulh, mulhu, mulhsu, div, divu, rem, remu
+- **Logic** (6): and, andn, or, orn, xor, xnor
+- **Shift** (5): sll, srl, sra, rol, ror
+- **Compare** (6): slt, sltu, min, max, minu, maxu
+- **Bit Manipulation** (4): clz, ctz, cpop, rev8
+- **Conditional** (2): cmovz, cmovnz
+- **Field Arithmetic** (5): fadd, fsub, fmul, fneg, finv
+- **Immediate** (9): addi, slti, sltiu, xori, ori, andi, slli, srli, srai
+- **Memory** (8): lw, lh, lb, lhu, lbu, sw, sh, sb
+- **Control Flow** (10): beq, bne, blt, bge, bltu, bgeu, jal, jalr, lui, auipc
+- **System** (2): ecall, ebreak
+- **ZK Operations** (10): read, write, hint, commit, assert_eq, assert_ne, assert_zero, range_check, debug, halt
 
 ### Syscalls (via ECALL)
 
 | Number | Name | Description |
 |--------|------|-------------|
-| 0x01 | SYS_POSEIDON2 | Poseidon2 hash |
-| 0x02 | SYS_KECCAK256 | Keccak-256 hash |
-| 0x03 | SYS_SHA256 | SHA-256 hash |
-| 0x04 | SYS_BLAKE3 | BLAKE3 hash |
-| 0x10 | SYS_ECDSA_VERIFY | ECDSA signature verification |
-| 0x11 | SYS_ED25519_VERIFY | Ed25519 signature verification |
-| 0x20 | SYS_BIGINT_ADD | 256-bit addition |
-| 0x21 | SYS_BIGINT_MUL | 256-bit multiplication |
+| 0x01 | SYS_EXIT | Exit with code |
+| 0x10 | SYS_READ | Read public input |
+| 0x11 | SYS_WRITE | Write public output |
+| 0x12 | SYS_POSEIDON2 | Poseidon2 permutation (12-element state) |
+| 0x13 | SYS_POSEIDON | Original Poseidon hash |
+| 0x20 | SYS_SHA256_INIT | Initialize SHA-256 context |
+| 0x21 | SYS_SHA256_UPDATE | Update SHA-256 |
+| 0x22 | SYS_SHA256_FINALIZE | Finalize SHA-256 |
+| 0x30 | SYS_MEMCPY | Copy memory region |
+| 0x31 | SYS_MEMSET | Set memory region |
+| 0x32 | SYS_BRK | Adjust heap break |
 
 ## Library Usage
 
@@ -151,8 +162,8 @@ use zkir_spec::{Program, Instruction, Register, BabyBear};
 
 // Create a simple program
 let code = vec![
-    0x00000073, // ecall
-    0x0FE00F6B, // halt (placeholder encoding)
+    0x0000000F, // ecall (v2.2 encoding)
+    0x3E00000E, // halt (v2.2 encoding)
 ];
 
 let program = Program::new(code);
@@ -164,12 +175,28 @@ let hash = program.hash();
 ```rust
 use zkir_assembler::assemble;
 
+// Assemble from text
 let source = r#"
-    ecall
+    .text
+    addi a0, zero, 10
+    addi a1, zero, 32
+    add a2, a0, a1
+    write a2
     halt
 "#;
 
-let program = assemble(source)?;
+let program = assemble(source).unwrap();
+
+// Or encode manually
+use zkir_spec::{Instruction, Register};
+use zkir_assembler::encode;
+
+let halt = encode(&Instruction::Halt);
+let add = encode(&Instruction::Add {
+    rd: Register::A0,
+    rs1: Register::A1,
+    rs2: Register::A2,
+});
 ```
 
 ### zkir-disassembler
@@ -178,40 +205,61 @@ let program = assemble(source)?;
 use zkir_spec::Program;
 use zkir_disassembler::disassemble;
 
-let code = vec![0x00000073]; // ecall
+let code = vec![0x0000000F]; // ecall (v2.2)
 let program = Program::new(code);
 let asm = disassemble(&program)?;
 println!("{}", asm);
+// Output:
+// ; ZK IR Disassembly
+// 0x00001000:  0000000F  ecall
 ```
 
 ### zkir-runtime
 
 ```rust
 use zkir_runtime::{VM, VMConfig};
-use zkir_spec::Program;
+use zkir_spec::{Program, Instruction, Register};
+use zkir_assembler::encoder::encode;
+
+// Build a simple add program
+let code = vec![
+    encode(&Instruction::Read { rd: Register::A0 }),
+    encode(&Instruction::Read { rd: Register::A1 }),
+    encode(&Instruction::Add {
+        rd: Register::A2,
+        rs1: Register::A0,
+        rs2: Register::A1,
+    }),
+    encode(&Instruction::Write { rs1: Register::A2 }),
+    encode(&Instruction::Halt),
+];
 
 let program = Program::new(code);
-let inputs = vec![10];
+let inputs = vec![10, 32];
 let config = VMConfig::default();
 
 let vm = VM::new(program, inputs, config);
 let result = vm.run()?;
-println!("Output: {:?}", result.outputs);
+println!("Output: {:?}", result.outputs); // [42]
+println!("Cycles: {}", result.cycles);    // 5
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (93 tests total)
 cargo test --all
 
 # Run tests for specific crate
 cargo test -p zkir-spec
-cargo test -p zkir-assembler
-cargo test -p zkir-disassembler
+cargo test -p zkir-assembler    # 61 tests
+cargo test -p zkir-disassembler # 13 tests
+cargo test -p zkir-runtime      # 17 tests
 
 # Run with output
 cargo test -- --nocapture
+
+# Current test status: ✅ All 93 tests passing
 ```
 
 ## Contributing

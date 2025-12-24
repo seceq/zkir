@@ -8,3 +8,9 @@ pub enum RuntimeError {
     #[error("VM halted: {0:?}")]
     Halt(HaltReason),
 }
+
+impl From<HaltReason> for RuntimeError {
+    fn from(reason: HaltReason) -> Self {
+        RuntimeError::Halt(reason)
+    }
+}

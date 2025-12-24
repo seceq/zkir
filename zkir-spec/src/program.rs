@@ -29,8 +29,8 @@ pub struct ProgramHeader {
 }
 
 impl ProgramHeader {
-    pub const MAGIC: u32 = 0x5A4B4952; // "ZKIR"
-    pub const VERSION: u32 = 0x00020001;
+    pub const MAGIC: u32 = 0x5A4B3232; // "ZK22"
+    pub const VERSION: u32 = 0x00020002; // v2.2
     pub const SIZE: usize = 28;
 }
 

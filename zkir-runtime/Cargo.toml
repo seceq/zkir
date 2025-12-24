@@ -8,10 +8,12 @@ description = "ZK IR virtual machine (32-bit)"
 
 [dependencies]
 zkir-spec = { workspace = true }
+zkir-disassembler = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+zkir-assembler = { workspace = true }
 proptest = { workspace = true }

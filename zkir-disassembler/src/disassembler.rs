@@ -48,8 +48,8 @@ mod tests {
     #[test]
     fn test_disassemble_simple() {
         let code = vec![
-            0x00000073, // ecall
-            0x00100073, // ebreak
+            0x0000000F, // ecall (v2.2 encoding)
+            0x0000400F, // ebreak (v2.2 encoding)
         ];
 
         let program = Program::new(code);

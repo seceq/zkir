@@ -1,9 +1,11 @@
-//! Virtual Machine (placeholder)
+//! Virtual Machine for ZK IR v2.2
 
 use zkir_spec::Program;
+use zkir_disassembler::decoder::decode;
 use crate::state::{VMState, HaltReason};
 use crate::io::IOHandler;
 use crate::error::RuntimeError;
+use crate::execute::execute;
 
 #[derive(Debug, Clone)]
 pub struct VMConfig {
@@ -35,7 +37,7 @@ pub struct ExecutionResult {
 pub struct VM {
     state: VMState,
     io: IOHandler,
-    _config: VMConfig,
+    config: VMConfig,
 }
 
 impl VM {
@@ -50,13 +52,67 @@ impl VM {
         VM {
             state,
             io: IOHandler::new(inputs),
-            _config: config,
+            config,
         }
     }
 
     pub fn run(mut self) -> Result<ExecutionResult, RuntimeError> {
-        // Placeholder: just halt immediately
-        self.state.halt(HaltReason::Halt);
+        loop {
+            // Check halt condition
+            if self.state.halted {
+                break;
+            }
+
+            // Check cycle limit
+            if self.state.cycle >= self.config.max_cycles {
+                self.state.halt(HaltReason::OutOfCycles);
+                break;
+            }
+
+            // Fetch instruction word from memory
+            let word = match self.state.memory.load_word(self.state.pc, self.state.cycle) {
+                Ok(w) => w,
+                Err(reason) => {
+                    self.state.halt(reason);
+                    break;
+                }
+            };
+
+            // Decode instruction
+            let instr = match decode(word) {
+                Ok(i) => i,
+                Err(_) => {
+                    self.state.halt(HaltReason::InvalidInstruction {
+                        pc: self.state.pc,
+                        word,
+                    });
+                    break;
+                }
+            };
+
+            // Execute instruction
+            if let Err(e) = execute(&instr, &mut self.state, &mut self.io) {
+                match e {
+                    RuntimeError::Halt(reason) => {
+                        self.state.halt(reason);
+                        break;
+                    }
+                }
+            }
+
+            // Increment cycle
+            self.state.cycle += 1;
+
+            // Optional trace logging
+            if self.config.trace_enabled {
+                tracing::trace!(
+                    "cycle={} pc={:08X} instr={:08X}",
+                    self.state.cycle,
+                    self.state.pc,
+                    word
+                );
+            }
+        }
 
         Ok(ExecutionResult {
             outputs: self.io.take_outputs(),
