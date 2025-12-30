@@ -1,13 +1,40 @@
 //! # Program Structure for ZKIR v3.4
 //!
 //! Program header and binary format with variable limb configuration.
+//!
+//! ## Binary Format Modes
+//!
+//! ZKIR bytecode files can be produced in two modes:
+//!
+//! ### Release Mode (Default)
+//!
+//! Standard format for execution and proving:
+//! ```text
+//! [32-byte header][code section][data section]
+//! ```
+//! - `entry_point` = `CODE_BASE (0x1000)` + offset to main
+//! - Code starts immediately after header (offset 32)
+//! - Compatible with `Program::from_bytes()`
+//!
+//! ### Debug Mode
+//!
+//! Extended format with symbol tables for debugging/disassembly:
+//! ```text
+//! [32-byte header][globals metadata][function table][code]
+//! ```
+//! - `entry_point` = file offset where code starts
+//! - Includes function names, sizes, and global variable metadata
+//! - NOT compatible with `Program::from_bytes()` - use disassembler
+//!
+//! Use `zkir-llvm --debug` or `-g` to produce debug format.
 
 use crate::config::{Config, ConfigError};
 use crate::error::ZkIrError;
 use std::fmt;
 
-/// Magic number for ZKIR files: "ZKIR" = 0x5A4B4952
-pub const MAGIC: u32 = 0x5A4B4952;
+/// Magic number for ZKIR files: "ZKIR" = 0x52494B5A
+/// Stored as little-endian, file starts with bytes: 5A 4B 49 52 ("ZKIR")
+pub const MAGIC: u32 = 0x52494B5A;
 
 /// Version: v3.4 = 0x00030004
 pub const VERSION: u32 = 0x00030004;
@@ -325,6 +352,54 @@ impl Default for Program {
     }
 }
 
+/// Detected format mode of a ZKIR bytecode file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatMode {
+    /// Release mode: [header][code][data] - compatible with Program::from_bytes()
+    Release,
+    /// Debug mode: [header][globals][functions][code] - use disassembler
+    Debug,
+}
+
+impl FormatMode {
+    /// Detect the format mode of a ZKIR bytecode file.
+    ///
+    /// Heuristic: In release mode, entry_point >= 0x1000 (CODE_BASE).
+    /// In debug mode, entry_point is a file offset (typically < 0x1000).
+    pub fn detect(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < ProgramHeader::SIZE {
+            return None;
+        }
+
+        // Check magic
+        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if magic != MAGIC {
+            return None;
+        }
+
+        // Read entry_point
+        let entry_point = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+
+        // In release mode, entry_point is CODE_BASE (0x1000) + offset
+        // In debug mode, entry_point is a file offset (typically small)
+        if entry_point >= 0x1000 {
+            Some(FormatMode::Release)
+        } else {
+            Some(FormatMode::Debug)
+        }
+    }
+
+    /// Check if the format is release mode (compatible with Program::from_bytes()).
+    pub fn is_release(&self) -> bool {
+        matches!(self, FormatMode::Release)
+    }
+
+    /// Check if the format is debug mode (requires disassembler).
+    pub fn is_debug(&self) -> bool {
+        matches!(self, FormatMode::Debug)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +454,36 @@ mod tests {
         assert_eq!(program.header, deserialized.header);
         assert_eq!(program.code, deserialized.code);
         assert_eq!(program.data, deserialized.data);
+    }
+
+    #[test]
+    fn test_format_mode_detection() {
+        // Release mode: entry_point = 0x1000 (CODE_BASE)
+        let mut release_header = ProgramHeader::new();
+        release_header.entry_point = 0x1000;
+        let release_bytes = release_header.to_bytes();
+        assert_eq!(FormatMode::detect(&release_bytes), Some(FormatMode::Release));
+
+        // Debug mode: entry_point = 32 (file offset)
+        let mut debug_header = ProgramHeader::new();
+        debug_header.entry_point = 32;
+        let debug_bytes = debug_header.to_bytes();
+        assert_eq!(FormatMode::detect(&debug_bytes), Some(FormatMode::Debug));
+
+        // Invalid magic
+        let mut invalid_bytes = release_bytes;
+        invalid_bytes[0] = 0xFF;
+        assert_eq!(FormatMode::detect(&invalid_bytes), None);
+
+        // Too short
+        assert_eq!(FormatMode::detect(&[0u8; 10]), None);
+    }
+
+    #[test]
+    fn test_format_mode_helpers() {
+        assert!(FormatMode::Release.is_release());
+        assert!(!FormatMode::Release.is_debug());
+        assert!(FormatMode::Debug.is_debug());
+        assert!(!FormatMode::Debug.is_release());
     }
 }

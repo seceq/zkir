@@ -2,18 +2,46 @@
 //!
 //! Disassemble ZKIR v3.4 bytecode into human-readable assembly.
 //!
+//! ## Format Modes
+//!
+//! ZKIR bytecode files can be in two formats:
+//!
+//! - **Release mode**: `[header][code][data]` - standard format for execution
+//! - **Debug mode**: `[header][globals][functions][code]` - includes symbol tables
+//!
+//! This disassembler works with `Program` objects (release format only).
+//! For debug format files produced by `zkir-llvm --debug`, use the built-in
+//! `zkir-llvm --emit disasm` command which understands the function table format.
+//!
+//! Use [`zkir_spec::FormatMode::detect()`] to check if a bytecode file is
+//! in release or debug format before attempting to load it.
+//!
 //! ## Example
 //!
 //! ```rust
-//! use zkir_spec::Program;
+//! use zkir_spec::{Program, FormatMode};
 //! use zkir_disassembler::disassemble;
 //!
-//! let mut program = Program::new();
-//! program.code = vec![0b111110, 0b111111]; // ecall, ebreak
-//! program.header.code_size = 8;
+//! // Check format before loading
+//! let bytes: &[u8] = &[/* ... bytecode ... */];
+//! # let mut program = Program::new();
+//! # program.code = vec![0x50, 0x51]; // ecall, ebreak
+//! # program.header.code_size = 8;
+//! # let bytes = program.to_bytes();
 //!
-//! let asm = disassemble(&program).unwrap();
-//! println!("{}", asm);
+//! match FormatMode::detect(&bytes) {
+//!     Some(FormatMode::Release) => {
+//!         let program = Program::from_bytes(&bytes).unwrap();
+//!         let asm = disassemble(&program).unwrap();
+//!         println!("{}", asm);
+//!     }
+//!     Some(FormatMode::Debug) => {
+//!         eprintln!("Debug format - use 'zkir-llvm --emit disasm' instead");
+//!     }
+//!     None => {
+//!         eprintln!("Invalid ZKIR file");
+//!     }
+//! }
 //! ```
 
 pub mod error;

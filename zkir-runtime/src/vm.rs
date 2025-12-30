@@ -6,7 +6,7 @@ use crate::memory::Memory;
 use crate::range_check::{RangeCheckTracker, RangeCheckWitness};
 use crate::state::{VMState, HaltReason};
 use crate::syscall::{handle_syscall, IOHandler};
-use zkir_spec::{Instruction, Program, MemoryOp, TraceRow};
+use zkir_spec::{Instruction, Program, FormatMode, MemoryOp, TraceRow};
 
 /// VM configuration
 #[derive(Debug, Clone)]
@@ -112,17 +112,43 @@ pub struct VM {
 }
 
 impl VM {
-    /// Create a new VM with a program and inputs
+    /// Create a new VM with a program and inputs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the program is in debug format (use release format for execution).
     pub fn new(program: Program, inputs: Vec<u64>, config: VMConfig) -> Self {
+        // Verify program is in release format (compatible with execution)
+        // Debug format has entry_point as a file offset, not a memory address
+        if program.header.entry_point < 0x1000 {
+            panic!(
+                "Program appears to be in debug format (entry_point={:#x}). \
+                 Use release format (zkir-llvm without --debug) for execution.",
+                program.header.entry_point
+            );
+        }
+
         let entry_point = program.header.entry_point as u64;
         let mut state = VMState::new(entry_point);
         let mut memory = Memory::new();
 
-        // Load program code into memory
+        // Load program code into memory at CODE_BASE (0x1000)
+        // The code section starts at CODE_BASE, and entry_point is CODE_BASE + offset_to_start
+        const CODE_BASE: u64 = 0x1000;
         if !program.code.is_empty() {
             memory
-                .load_code(&program.code, entry_point)
+                .load_code(&program.code, CODE_BASE)
                 .expect("Failed to load program code");
+        }
+
+        // Load data section right after code
+        // Data is placed at CODE_BASE + code_size
+        if !program.data.is_empty() {
+            let code_size = (program.code.len() * 4) as u64;
+            let data_base = CODE_BASE + code_size;
+            memory
+                .load_data(&program.data, data_base)
+                .expect("Failed to load program data");
         }
 
         // Disable strict memory protection for now

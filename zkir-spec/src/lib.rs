@@ -35,7 +35,7 @@ pub use register::{Register, NUM_REGISTERS};
 pub use instruction::Instruction;
 pub use opcode::{Opcode, InstructionFamily};
 pub use error::ZkIrError;
-pub use program::{Program, ProgramHeader, MAGIC, VERSION};
+pub use program::{Program, ProgramHeader, FormatMode, MAGIC, VERSION};
 pub use trace::{
     TraceRow, MemoryOp, MemOpType, CryptoWitness, Sha256Witness,
     Poseidon2Witness, Keccak256Witness,

@@ -1,7 +1,7 @@
 //! # ZKIR v3.4 Opcode Definitions
 //!
 //! This module defines the opcode values for all ZKIR instructions.
-//! Opcodes are 6 bits (0x00-0x3F).
+//! Opcodes are 7 bits (0x00-0x7F).
 //!
 //! ## Opcode Encoding
 //!
@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Instruction opcode (6 bits, values 0x00-0x51)
+/// Instruction opcode (7 bits, values 0x00-0x7F)
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Opcode {

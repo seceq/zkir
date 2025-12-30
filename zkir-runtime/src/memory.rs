@@ -273,6 +273,26 @@ impl Memory {
         Ok(())
     }
 
+    /// Load program data section into memory
+    ///
+    /// Data section is loaded right after the code section.
+    /// The base address should be CODE_BASE + code_size.
+    pub fn load_data(&mut self, data: &[u8], base: u64) -> Result<()> {
+        // Temporarily disable protection to load data
+        let was_protected = self.strict_protection;
+        self.strict_protection = false;
+
+        for (i, &byte) in data.iter().enumerate() {
+            let addr = base + i as u64;
+            self.write_u8(addr, byte)?;
+        }
+
+        // Restore protection
+        self.strict_protection = was_protected;
+
+        Ok(())
+    }
+
     /// Read single byte
     pub fn read_u8(&mut self, addr: u64) -> Result<u8> {
         let page_num = addr / PAGE_SIZE as u64;
