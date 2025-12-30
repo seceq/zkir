@@ -1,238 +1,152 @@
-//! Instruction encoding to 30-bit format (ZK IR v2.2)
+//! Instruction encoding to 32-bit format (ZKIR v3.4)
 //!
-//! Instructions are 30 bits stored in 32-bit slots (bits 31:30 = 0)
+//! ## Instruction Formats (32 bits total, 7-bit opcode field):
+//! - R-type:  [opcode:7][rd:4][rs1:4][rs2:4][funct:13]  = 7+4+4+4+13 = 32 bits
+//! - I-type:  [opcode:7][rd:4][rs1:4][imm:17]           = 7+4+4+17 = 32 bits
+//! - S-type:  [opcode:7][rs1:4][rs2:4][imm:17]          = 7+4+4+17 = 32 bits
+//! - B-type:  [opcode:7][rs1:4][rs2:4][offset:17]       = 7+4+4+17 = 32 bits
+//! - J-type:  [opcode:7][rd:4][offset:21]               = 7+4+21 = 32 bits
+//!
+//! Note: Despite documentation claiming "6-bit opcodes", the actual opcode values
+//! range from 0x00-0x51 which requires 7 bits. We use 7 bits for the opcode field.
 
-use zkir_spec::{Instruction, Register};
+use zkir_spec::{Instruction, Opcode, Register};
 
-/// Encode instruction to 32-bit word (30-bit instruction, upper 2 bits zero)
+/// Encode instruction to 32-bit word
+///
+/// Uses opcodes from the ZKIR v3.4 spec (values 0x00-0x51)
 pub fn encode(instr: &Instruction) -> u32 {
     match instr {
-        // ========== R-type ALU (opcode = 0000) ==========
+        // ========== Arithmetic (R-type: 0x00-0x07) ==========
+        Instruction::Add { rd, rs1, rs2 } => encode_r_type(Opcode::Add.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Sub { rd, rs1, rs2 } => encode_r_type(Opcode::Sub.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Mul { rd, rs1, rs2 } => encode_r_type(Opcode::Mul.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Mulh { rd, rs1, rs2 } => encode_r_type(Opcode::Mulh.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Divu { rd, rs1, rs2 } => encode_r_type(Opcode::Divu.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Remu { rd, rs1, rs2 } => encode_r_type(Opcode::Remu.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Div { rd, rs1, rs2 } => encode_r_type(Opcode::Div.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Rem { rd, rs1, rs2 } => encode_r_type(Opcode::Rem.to_u8() as u32, *rd, *rs1, *rs2, 0),
 
-        // Arithmetic
-        Instruction::Add { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b000, 0b00, 0b0000),
-        Instruction::Sub { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b000, 0b01, 0b0000),
-        Instruction::Mul { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b000, 0b10, 0b0000),
-        Instruction::Mulh { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b000, 0b11, 0b0000),
-        Instruction::Mulhu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b101, 0b10, 0b0000),
-        Instruction::Mulhsu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b101, 0b11, 0b0000),
+        // ========== Logical (R-type: 0x10-0x12) ==========
+        Instruction::And { rd, rs1, rs2 } => encode_r_type(Opcode::And.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Or { rd, rs1, rs2 } => encode_r_type(Opcode::Or.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Xor { rd, rs1, rs2 } => encode_r_type(Opcode::Xor.to_u8() as u32, *rd, *rs1, *rs2, 0),
 
-        // Division
-        Instruction::Div { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b110, 0b00, 0b0000),
-        Instruction::Divu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b110, 0b01, 0b0000),
-        Instruction::Rem { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b110, 0b10, 0b0000),
-        Instruction::Remu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b110, 0b11, 0b0000),
+        // ========== Shift (R-type: 0x18-0x1A) ==========
+        Instruction::Sll { rd, rs1, rs2 } => encode_r_type(Opcode::Sll.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Srl { rd, rs1, rs2 } => encode_r_type(Opcode::Srl.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Sra { rd, rs1, rs2 } => encode_r_type(Opcode::Sra.to_u8() as u32, *rd, *rs1, *rs2, 0),
 
-        // Logic
-        Instruction::And { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b001, 0b00, 0b0000),
-        Instruction::Andn { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b001, 0b01, 0b0000),
-        Instruction::Or { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b001, 0b10, 0b0000),
-        Instruction::Orn { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b001, 0b11, 0b0000),
-        Instruction::Xor { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b010, 0b00, 0b0000),
-        Instruction::Xnor { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b010, 0b01, 0b0000),
+        // ========== Compare (R-type: 0x20-0x25) ==========
+        Instruction::Sltu { rd, rs1, rs2 } => encode_r_type(Opcode::Sltu.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Sgeu { rd, rs1, rs2 } => encode_r_type(Opcode::Sgeu.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Slt { rd, rs1, rs2 } => encode_r_type(Opcode::Slt.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Sge { rd, rs1, rs2 } => encode_r_type(Opcode::Sge.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Seq { rd, rs1, rs2 } => encode_r_type(Opcode::Seq.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Sne { rd, rs1, rs2 } => encode_r_type(Opcode::Sne.to_u8() as u32, *rd, *rs1, *rs2, 0),
 
-        // Shift
-        Instruction::Sll { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b010, 0b10, 0b0000),
-        Instruction::Srl { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b011, 0b00, 0b0000),
-        Instruction::Sra { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b011, 0b01, 0b0000),
-        Instruction::Rol { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b010, 0b11, 0b0000),
-        Instruction::Ror { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b011, 0b10, 0b0000),
+        // ========== Conditional Move (R-type: 0x26-0x28) ==========
+        Instruction::Cmov { rd, rs1, rs2 } => encode_r_type(Opcode::Cmov.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Cmovz { rd, rs1, rs2 } => encode_r_type(Opcode::Cmovz.to_u8() as u32, *rd, *rs1, *rs2, 0),
+        Instruction::Cmovnz { rd, rs1, rs2 } => encode_r_type(Opcode::Cmovnz.to_u8() as u32, *rd, *rs1, *rs2, 0),
 
-        // Compare
-        Instruction::Slt { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b100, 0b00, 0b0000),
-        Instruction::Sltu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b100, 0b01, 0b0000),
-        Instruction::Min { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b100, 0b10, 0b0000),
-        Instruction::Max { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b100, 0b11, 0b0000),
-        Instruction::Minu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b101, 0b00, 0b0000),
-        Instruction::Maxu { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b101, 0b01, 0b0000),
+        // ========== Immediate Arithmetic (I-type: 0x08) ==========
+        Instruction::Addi { rd, rs1, imm } => encode_i_type(Opcode::Addi.to_u8() as u32, *rd, *rs1, *imm),
 
-        // Bit Manipulation
-        Instruction::Clz { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b011, 0b11, 0b0000),
-        Instruction::Ctz { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b111, 0b10, 0b0000),
-        Instruction::Cpop { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b111, 0b01, 0b0000),
-        Instruction::Rev8 { rd, rs1, rs2 } => encode_r_type(*rd, *rs1, *rs2, 0b111, 0b00, 0b0000),
+        // ========== Immediate Logical (I-type: 0x13-0x15) ==========
+        Instruction::Andi { rd, rs1, imm } => encode_i_type(Opcode::Andi.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Ori { rd, rs1, imm } => encode_i_type(Opcode::Ori.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Xori { rd, rs1, imm } => encode_i_type(Opcode::Xori.to_u8() as u32, *rd, *rs1, *imm),
 
-        // Conditional Move (ext2)
-        Instruction::Cmovz { rd, rs1, rs2 } => encode_r_type_ext2(*rd, *rs1, *rs2, 0b000000),
-        Instruction::Cmovnz { rd, rs1, rs2 } => encode_r_type_ext2(*rd, *rs1, *rs2, 0b000001),
+        // ========== Shift Immediate (I-type: 0x1B-0x1D) ==========
+        Instruction::Slli { rd, rs1, shamt } => encode_i_type(Opcode::Slli.to_u8() as u32, *rd, *rs1, *shamt as i32),
+        Instruction::Srli { rd, rs1, shamt } => encode_i_type(Opcode::Srli.to_u8() as u32, *rd, *rs1, *shamt as i32),
+        Instruction::Srai { rd, rs1, shamt } => encode_i_type(Opcode::Srai.to_u8() as u32, *rd, *rs1, *shamt as i32),
 
-        // Field Operations (special encoding: bits 29:24 = 111111)
-        Instruction::Fadd { rd, rs1, rs2 } => encode_field_op(*rd, *rs1, *rs2, 0b000),
-        Instruction::Fsub { rd, rs1, rs2 } => encode_field_op(*rd, *rs1, *rs2, 0b001),
-        Instruction::Fmul { rd, rs1, rs2 } => encode_field_op(*rd, *rs1, *rs2, 0b010),
-        Instruction::Fneg { rd, rs1, rs2 } => encode_field_op(*rd, *rs1, *rs2, 0b011),
-        Instruction::Finv { rd, rs1, rs2 } => encode_field_op(*rd, *rs1, *rs2, 0b100),
+        // ========== Load (I-type: 0x30-0x35) ==========
+        Instruction::Lb { rd, rs1, imm } => encode_i_type(Opcode::Lb.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Lbu { rd, rs1, imm } => encode_i_type(Opcode::Lbu.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Lh { rd, rs1, imm } => encode_i_type(Opcode::Lh.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Lhu { rd, rs1, imm } => encode_i_type(Opcode::Lhu.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Lw { rd, rs1, imm } => encode_i_type(Opcode::Lw.to_u8() as u32, *rd, *rs1, *imm),
+        Instruction::Ld { rd, rs1, imm } => encode_i_type(Opcode::Ld.to_u8() as u32, *rd, *rs1, *imm),
 
-        // ========== I-type Immediate (opcode = 0001) ==========
-        Instruction::Addi { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b000, 0b0001),
-        Instruction::Slti { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b010, 0b0001),
-        Instruction::Sltiu { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b011, 0b0001),
-        Instruction::Xori { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b100, 0b0001),
-        Instruction::Ori { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b110, 0b0001),
-        Instruction::Andi { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b111, 0b0001),
-        Instruction::Slli { rd, rs1, shamt } => encode_i_type(*rd, *rs1, *shamt as u32, 0b001, 0b0001),
-        Instruction::Srli { rd, rs1, shamt } => encode_i_type(*rd, *rs1, *shamt as u32, 0b101, 0b0001),
-        Instruction::Srai { rd, rs1, shamt } => encode_i_type(*rd, *rs1, (*shamt as u32) | (1 << 12), 0b101, 0b0001),
+        // ========== Store (S-type: 0x38-0x3B) ==========
+        Instruction::Sb { rs1, rs2, imm } => encode_s_type(Opcode::Sb.to_u8() as u32, *rs1, *rs2, *imm),
+        Instruction::Sh { rs1, rs2, imm } => encode_s_type(Opcode::Sh.to_u8() as u32, *rs1, *rs2, *imm),
+        Instruction::Sw { rs1, rs2, imm } => encode_s_type(Opcode::Sw.to_u8() as u32, *rs1, *rs2, *imm),
+        Instruction::Sd { rs1, rs2, imm } => encode_s_type(Opcode::Sd.to_u8() as u32, *rs1, *rs2, *imm),
 
-        // ========== Load (opcode = 0010) ==========
-        Instruction::Lb { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b000, 0b0010),
-        Instruction::Lh { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b001, 0b0010),
-        Instruction::Lw { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b010, 0b0010),
-        Instruction::Lbu { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b100, 0b0010),
-        Instruction::Lhu { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b101, 0b0010),
+        // ========== Branch (B-type: 0x40-0x45) ==========
+        Instruction::Beq { rs1, rs2, offset } => encode_b_type(Opcode::Beq.to_u8() as u32, *rs1, *rs2, *offset),
+        Instruction::Bne { rs1, rs2, offset } => encode_b_type(Opcode::Bne.to_u8() as u32, *rs1, *rs2, *offset),
+        Instruction::Blt { rs1, rs2, offset } => encode_b_type(Opcode::Blt.to_u8() as u32, *rs1, *rs2, *offset),
+        Instruction::Bge { rs1, rs2, offset } => encode_b_type(Opcode::Bge.to_u8() as u32, *rs1, *rs2, *offset),
+        Instruction::Bltu { rs1, rs2, offset } => encode_b_type(Opcode::Bltu.to_u8() as u32, *rs1, *rs2, *offset),
+        Instruction::Bgeu { rs1, rs2, offset } => encode_b_type(Opcode::Bgeu.to_u8() as u32, *rs1, *rs2, *offset),
 
-        // ========== Store (opcode = 0011) ==========
-        Instruction::Sb { rs1, rs2, imm } => encode_s_type(*rs1, *rs2, *imm as u32, 0b000, 0b0011),
-        Instruction::Sh { rs1, rs2, imm } => encode_s_type(*rs1, *rs2, *imm as u32, 0b001, 0b0011),
-        Instruction::Sw { rs1, rs2, imm } => encode_s_type(*rs1, *rs2, *imm as u32, 0b010, 0b0011),
+        // ========== Jump (J-type: 0x48, I-type: 0x49) ==========
+        Instruction::Jal { rd, offset } => encode_j_type(Opcode::Jal.to_u8() as u32, *rd, *offset),
+        Instruction::Jalr { rd, rs1, imm } => encode_i_type(Opcode::Jalr.to_u8() as u32, *rd, *rs1, *imm),
 
-        // ========== Branch (opcodes 0100-1001) ==========
-        Instruction::Beq { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b0100),
-        Instruction::Bne { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b0101),
-        Instruction::Blt { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b0110),
-        Instruction::Bge { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b0111),
-        Instruction::Bltu { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b1000),
-        Instruction::Bgeu { rs1, rs2, imm } => encode_b_type(*rs1, *rs2, *imm as u32, 0b1001),
-
-        // ========== Upper Immediate (opcodes 1010-1011) ==========
-        Instruction::Lui { rd, imm } => encode_u_type(*rd, *imm as u32, 0b1010),
-        Instruction::Auipc { rd, imm } => encode_u_type(*rd, *imm as u32, 0b1011),
-
-        // ========== Jump (opcodes 1100-1101) ==========
-        Instruction::Jal { rd, imm } => encode_j_type(*rd, *imm as u32, 0b1100),
-        Instruction::Jalr { rd, rs1, imm } => encode_i_type(*rd, *rs1, *imm as u32, 0b000, 0b1101),
-
-        // ========== ZK Operations (opcode = 1110) ==========
-        Instruction::Read { rd } => encode_z_type(*rd, Register::R0, 0b00000, 0, 0b1110),
-        Instruction::Write { rs1 } => encode_z_type(Register::R0, *rs1, 0b00001, 0, 0b1110),
-        Instruction::Hint { rd } => encode_z_type(*rd, Register::R0, 0b00010, 0, 0b1110),
-        Instruction::Commit { rs1 } => encode_z_type(Register::R0, *rs1, 0b00011, 0, 0b1110),
-        Instruction::AssertEq { rs1, rs2 } => encode_z_type_rs2(*rs1, *rs2, 0b00100, 0b1110),
-        Instruction::AssertNe { rs1, rs2 } => encode_z_type_rs2(*rs1, *rs2, 0b00101, 0b1110),
-        Instruction::AssertZero { rs1 } => encode_z_type(Register::R0, *rs1, 0b00110, 0, 0b1110),
-        Instruction::RangeCheck { rs1, bits } => encode_z_type(Register::R0, *rs1, 0b00111, *bits as u32, 0b1110),
-        Instruction::Debug { rs1 } => encode_z_type(Register::R0, *rs1, 0b01000, 0, 0b1110),
-        Instruction::Halt => encode_z_type(Register::R0, Register::R0, 0b11111, 0, 0b1110),
-
-        // ========== System (opcode = 1111) ==========
-        Instruction::Ecall => encode_i_type(Register::R0, Register::R0, 0, 0b000, 0b1111),
-        Instruction::Ebreak => encode_i_type(Register::R0, Register::R0, 1, 0b000, 0b1111),
+        // ========== System (0x50-0x51) ==========
+        Instruction::Ecall => encode_i_type(Opcode::Ecall.to_u8() as u32, Register::R0, Register::R0, 0),
+        Instruction::Ebreak => encode_i_type(Opcode::Ebreak.to_u8() as u32, Register::R0, Register::R0, 0),
     }
 }
 
 /// Encode R-type instruction
-/// Format: | unused(6) | ext(2) | funct(3) | rs2(5) | rs1(5) | rd(5) | opcode(4) |
-fn encode_r_type(rd: Register, rs1: Register, rs2: Register, funct: u32, ext: u32, opcode: u32) -> u32 {
+/// Format: [opcode:7][rd:4][rs1:4][rs2:4][funct:13]
+fn encode_r_type(opcode: u32, rd: Register, rs1: Register, rs2: Register, funct: u32) -> u32 {
     let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rd.index() as u32 & 0x1F) << 4;   // bits 8:4
-    instr |= (rs1.index() as u32 & 0x1F) << 9;  // bits 13:9
-    instr |= (rs2.index() as u32 & 0x1F) << 14; // bits 18:14
-    instr |= (funct & 0x7) << 19;               // bits 21:19
-    instr |= (ext & 0x3) << 22;                 // bits 23:22
-    // bits 29:24 = 0 (unused)
-    instr
-}
-
-/// Encode R-type with ext2 extension (for CMOVZ/CMOVNZ)
-/// Format: | ext2(6) | ext=11 | funct=111 | rs2(5) | rs1(5) | rd(5) | opcode(4) |
-fn encode_r_type_ext2(rd: Register, rs1: Register, rs2: Register, ext2: u32) -> u32 {
-    let mut instr = 0u32;
-    instr |= 0b0000;                            // opcode = 0000
-    instr |= (rd.index() as u32 & 0x1F) << 4;   // bits 8:4
-    instr |= (rs1.index() as u32 & 0x1F) << 9;  // bits 13:9
-    instr |= (rs2.index() as u32 & 0x1F) << 14; // bits 18:14
-    instr |= 0b111 << 19;                       // funct = 111
-    instr |= 0b11 << 22;                        // ext = 11
-    instr |= (ext2 & 0x3F) << 24;               // bits 29:24 = ext2
-    instr
-}
-
-/// Encode field operation (special R-type encoding)
-/// Format: | 111111 | ext=00 | funct | rs2(5) | rs1(5) | rd(5) | opcode=0000 |
-fn encode_field_op(rd: Register, rs1: Register, rs2: Register, funct: u32) -> u32 {
-    let mut instr = 0u32;
-    instr |= 0b0000;                            // opcode = 0000
-    instr |= (rd.index() as u32 & 0x1F) << 4;   // bits 8:4
-    instr |= (rs1.index() as u32 & 0x1F) << 9;  // bits 13:9
-    instr |= (rs2.index() as u32 & 0x1F) << 14; // bits 18:14
-    instr |= (funct & 0x7) << 19;               // bits 21:19
-    instr |= 0b00 << 22;                        // ext = 00
-    instr |= 0b111111 << 24;                    // bits 29:24 = 111111 (field op marker)
+    instr |= opcode & 0x7F;                          // bits 6:0 (7-bit opcode)
+    instr |= (rd as u32 & 0xF) << 7;                 // bits 10:7 (4-bit rd)
+    instr |= (rs1 as u32 & 0xF) << 11;               // bits 14:11 (4-bit rs1)
+    instr |= (rs2 as u32 & 0xF) << 15;               // bits 18:15 (4-bit rs2)
+    instr |= (funct & 0x1FFF) << 19;                 // bits 31:19 (13-bit funct)
     instr
 }
 
 /// Encode I-type instruction
-/// Format: | funct(3) | imm(13) | rs1(5) | rd(5) | opcode(4) |
-fn encode_i_type(rd: Register, rs1: Register, imm: u32, funct: u32, opcode: u32) -> u32 {
+/// Format: [opcode:7][rd:4][rs1:4][imm:17]
+fn encode_i_type(opcode: u32, rd: Register, rs1: Register, imm: i32) -> u32 {
     let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rd.index() as u32 & 0x1F) << 4;   // bits 8:4
-    instr |= (rs1.index() as u32 & 0x1F) << 9;  // bits 13:9
-    instr |= (imm & 0x1FFF) << 14;              // bits 26:14 (13-bit imm)
-    instr |= (funct & 0x7) << 27;               // bits 29:27
+    instr |= opcode & 0x7F;                          // bits 6:0 (7-bit opcode)
+    instr |= (rd as u32 & 0xF) << 7;                 // bits 10:7 (4-bit rd)
+    instr |= (rs1 as u32 & 0xF) << 11;               // bits 14:11 (4-bit rs1)
+    instr |= ((imm as u32) & 0x1FFFF) << 15;         // bits 31:15 (17-bit imm)
     instr
 }
 
-/// Encode S-type instruction (Store)
-/// Format: | imm(13) | rs2(5) | rs1(5) | funct(3) | opcode(4) |
-fn encode_s_type(rs1: Register, rs2: Register, imm: u32, funct: u32, opcode: u32) -> u32 {
+/// Encode S-type instruction (stores)
+/// Format: [opcode:7][rs1:4][rs2:4][imm:17]
+fn encode_s_type(opcode: u32, rs1: Register, rs2: Register, imm: i32) -> u32 {
     let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (funct & 0x7) << 4;                // bits 6:4
-    instr |= (rs1.index() as u32 & 0x1F) << 7;  // bits 11:7
-    instr |= (rs2.index() as u32 & 0x1F) << 12; // bits 16:12
-    instr |= (imm & 0x1FFF) << 17;              // bits 29:17 (13-bit imm)
+    instr |= opcode & 0x7F;                          // bits 6:0 (7-bit opcode)
+    instr |= (rs1 as u32 & 0xF) << 7;                // bits 10:7 (4-bit rs1 - base address)
+    instr |= (rs2 as u32 & 0xF) << 11;               // bits 14:11 (4-bit rs2 - value to store)
+    instr |= ((imm as u32) & 0x1FFFF) << 15;         // bits 31:15 (17-bit imm)
     instr
 }
 
-/// Encode B-type instruction (Branch)
-/// Same as S-type but with different semantics
-fn encode_b_type(rs1: Register, rs2: Register, imm: u32, opcode: u32) -> u32 {
+/// Encode B-type instruction
+/// Format: [opcode:7][rs1:4][rs2:4][offset:17]
+fn encode_b_type(opcode: u32, rs1: Register, rs2: Register, offset: i32) -> u32 {
     let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rs2.index() as u32 & 0x1F) << 4;  // bits 8:4 (note: rs2 in rd position)
-    instr |= (rs1.index() as u32 & 0x1F) << 9;  // bits 13:9
-    instr |= (imm & 0xFFFF) << 14;              // bits 29:14 (16-bit imm)
+    instr |= opcode & 0x7F;                          // bits 6:0 (7-bit opcode)
+    instr |= (rs1 as u32 & 0xF) << 7;                // bits 10:7 (4-bit rs1)
+    instr |= (rs2 as u32 & 0xF) << 11;               // bits 14:11 (4-bit rs2)
+    instr |= ((offset as u32) & 0x1FFFF) << 15;      // bits 31:15 (17-bit offset)
     instr
 }
 
-/// Encode U-type instruction (Upper Immediate)
-/// Format: | imm_hi(21) | rd(5) | opcode(4) |
-fn encode_u_type(rd: Register, imm: u32, opcode: u32) -> u32 {
+/// Encode J-type instruction
+/// Format: [opcode:7][rd:4][offset:21]
+fn encode_j_type(opcode: u32, rd: Register, offset: i32) -> u32 {
     let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rd.index() as u32 & 0x1F) << 4;   // bits 8:4
-    instr |= (imm & 0x1FFFFF) << 9;             // bits 29:9 (21-bit imm)
-    instr
-}
-
-/// Encode J-type instruction (Jump)
-/// Format: | imm(21) | rd(5) | opcode(4) |
-fn encode_j_type(rd: Register, imm: u32, opcode: u32) -> u32 {
-    // Same as U-type for v2.2
-    encode_u_type(rd, imm, opcode)
-}
-
-/// Encode Z-type instruction (ZK Operations)
-/// Format: | func(5) | imm(8) | rs1(5) | rd(5) | opcode(4) |
-fn encode_z_type(rd: Register, rs1: Register, func: u32, imm: u32, opcode: u32) -> u32 {
-    let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rd.index() as u32 & 0x1F) << 7;   // bits 11:7 (note: different position)
-    instr |= (rs1.index() as u32 & 0x1F) << 12; // bits 16:12
-    instr |= (imm & 0xFF) << 17;                // bits 24:17
-    instr |= (func & 0x1F) << 25;               // bits 29:25
-    instr
-}
-
-/// Encode Z-type with rs2 (for ASSERT_EQ, ASSERT_NE)
-fn encode_z_type_rs2(rs1: Register, rs2: Register, func: u32, opcode: u32) -> u32 {
-    let mut instr = 0u32;
-    instr |= opcode & 0xF;                      // bits 3:0
-    instr |= (rs2.index() as u32 & 0x1F) << 7;  // bits 11:7 (rs2 in rd position)
-    instr |= (rs1.index() as u32 & 0x1F) << 12; // bits 16:12
-    instr |= (func & 0x1F) << 25;               // bits 29:25
+    instr |= opcode & 0x7F;                          // bits 6:0 (7-bit opcode)
+    instr |= (rd as u32 & 0xF) << 7;                 // bits 10:7 (4-bit rd)
+    instr |= ((offset as u32) & 0x1FFFFF) << 11;     // bits 31:11 (21-bit offset)
     instr
 }
 
@@ -242,92 +156,190 @@ mod tests {
 
     #[test]
     fn test_encode_add() {
-        // ADD r5, r6, r7
+        // ADD r4, r5, r6
         let instr = encode(&Instruction::Add {
-            rd: Register::R5,
-            rs1: Register::R6,
-            rs2: Register::R7,
+            rd: Register::R4,
+            rs1: Register::R5,
+            rs2: Register::R6,
         });
 
-        // opcode=0000, rd=5, rs1=6, rs2=7, funct=000, ext=00
-        let opcode = instr & 0xF;
-        let rd = (instr >> 4) & 0x1F;
-        let rs1 = (instr >> 9) & 0x1F;
-        let rs2 = (instr >> 14) & 0x1F;
+        // Extract fields (7-bit opcode format)
+        let opcode = instr & 0x7F;
+        let rd = (instr >> 7) & 0xF;
+        let rs1 = (instr >> 11) & 0xF;
+        let rs2 = (instr >> 15) & 0xF;
 
-        assert_eq!(opcode, 0b0000);
-        assert_eq!(rd, 5);
-        assert_eq!(rs1, 6);
-        assert_eq!(rs2, 7);
+        assert_eq!(opcode, Opcode::Add.to_u8() as u32);
+        assert_eq!(rd, 4);
+        assert_eq!(rs1, 5);
+        assert_eq!(rs2, 6);
     }
 
     #[test]
     fn test_encode_addi() {
-        // ADDI r5, r6, 100
+        // ADDI r4, r5, 100
         let instr = encode(&Instruction::Addi {
-            rd: Register::R5,
-            rs1: Register::R6,
+            rd: Register::R4,
+            rs1: Register::R5,
             imm: 100,
         });
 
-        let opcode = instr & 0xF;
-        let rd = (instr >> 4) & 0x1F;
-        let rs1 = (instr >> 9) & 0x1F;
-        let imm = (instr >> 14) & 0x1FFF;
+        let opcode = instr & 0x7F;
+        let rd = (instr >> 7) & 0xF;
+        let rs1 = (instr >> 11) & 0xF;
+        let imm = ((instr >> 15) & 0x1FFFF) as i32;
 
-        assert_eq!(opcode, 0b0001);
-        assert_eq!(rd, 5);
-        assert_eq!(rs1, 6);
+        assert_eq!(opcode, Opcode::Addi.to_u8() as u32);
+        assert_eq!(rd, 4);
+        assert_eq!(rs1, 5);
         assert_eq!(imm, 100);
     }
 
     #[test]
-    fn test_encode_fadd() {
-        // FADD r5, r6, r7
-        let instr = encode(&Instruction::Fadd {
-            rd: Register::R5,
-            rs1: Register::R6,
-            rs2: Register::R7,
+    fn test_encode_and() {
+        // AND r2, r3, r4
+        let instr = encode(&Instruction::And {
+            rd: Register::R2,
+            rs1: Register::R3,
+            rs2: Register::R4,
         });
 
-        // Check field op marker (bits 29:24 = 111111)
-        let marker = (instr >> 24) & 0x3F;
-        assert_eq!(marker, 0b111111);
+        let opcode = instr & 0x7F;
+        assert_eq!(opcode, Opcode::And.to_u8() as u32); // 0x10
+    }
+
+    #[test]
+    fn test_encode_lw() {
+        // LW r4, 16(r2)
+        let instr = encode(&Instruction::Lw {
+            rd: Register::R4,
+            rs1: Register::R2,
+            imm: 16,
+        });
+
+        let opcode = instr & 0x7F;
+        assert_eq!(opcode, Opcode::Lw.to_u8() as u32); // 0x34
+    }
+
+    #[test]
+    fn test_encode_beq() {
+        // BEQ r4, r5, 8
+        let instr = encode(&Instruction::Beq {
+            rs1: Register::R4,
+            rs2: Register::R5,
+            offset: 8,
+        });
+
+        let opcode = instr & 0x7F;
+        let rs1 = (instr >> 7) & 0xF;
+        let rs2 = (instr >> 11) & 0xF;
+        let offset = ((instr >> 15) & 0x1FFFF) as i32;
+
+        assert_eq!(opcode, Opcode::Beq.to_u8() as u32); // 0x40
+        assert_eq!(rs1, 4);
+        assert_eq!(rs2, 5);
+        assert_eq!(offset, 8);
+    }
+
+    #[test]
+    fn test_encode_jal() {
+        // JAL r1, 100
+        let instr = encode(&Instruction::Jal {
+            rd: Register::R1,
+            offset: 100,
+        });
+
+        let opcode = instr & 0x7F;
+        let rd = (instr >> 7) & 0xF;
+        let offset = ((instr >> 11) & 0x1FFFFF) as i32;
+
+        assert_eq!(opcode, Opcode::Jal.to_u8() as u32); // 0x48
+        assert_eq!(rd, 1);
+        assert_eq!(offset, 100);
+    }
+
+    #[test]
+    fn test_encode_cmov() {
+        // CMOV r4, r5, r6
+        let instr = encode(&Instruction::Cmov {
+            rd: Register::R4,
+            rs1: Register::R5,
+            rs2: Register::R6,
+        });
+
+        let opcode = instr & 0x7F;
+        let rd = (instr >> 7) & 0xF;
+        let rs1 = (instr >> 11) & 0xF;
+        let rs2 = (instr >> 15) & 0xF;
+
+        assert_eq!(opcode, Opcode::Cmov.to_u8() as u32); // 0x26
+        assert_eq!(rd, 4);
+        assert_eq!(rs1, 5);
+        assert_eq!(rs2, 6);
     }
 
     #[test]
     fn test_encode_ecall() {
         let instr = encode(&Instruction::Ecall);
-        let opcode = instr & 0xF;
-        assert_eq!(opcode, 0b1111);
+        let opcode = instr & 0x7F;
+        assert_eq!(opcode, Opcode::Ecall.to_u8() as u32); // 0x50
     }
 
     #[test]
-    fn test_encode_halt() {
-        let instr = encode(&Instruction::Halt);
-        let opcode = instr & 0xF;
-        let func = (instr >> 25) & 0x1F;
-        assert_eq!(opcode, 0b1110);
-        assert_eq!(func, 0b11111);
+    fn test_encode_ebreak() {
+        let instr = encode(&Instruction::Ebreak);
+        let opcode = instr & 0x7F;
+        assert_eq!(opcode, Opcode::Ebreak.to_u8() as u32); // 0x51
     }
 
     #[test]
-    fn test_instruction_fits_30bits() {
-        // Test that all instructions fit in 30 bits (bits 31:30 = 0)
+    fn test_instruction_fits_32bits() {
+        // Test that all instructions fit in 32 bits
         let instructions = vec![
-            Instruction::Add { rd: Register::R5, rs1: Register::R6, rs2: Register::R7 },
-            Instruction::Addi { rd: Register::R5, rs1: Register::R6, imm: 100 },
-            Instruction::Lw { rd: Register::R5, rs1: Register::R6, imm: 0 },
-            Instruction::Sw { rs1: Register::R5, rs2: Register::R6, imm: 0 },
-            Instruction::Beq { rs1: Register::R5, rs2: Register::R6, imm: 10 },
-            Instruction::Jal { rd: Register::R1, imm: 100 },
+            Instruction::Add { rd: Register::R4, rs1: Register::R5, rs2: Register::R6 },
+            Instruction::Addi { rd: Register::R4, rs1: Register::R5, imm: 100 },
+            Instruction::Lw { rd: Register::R4, rs1: Register::R2, imm: 0 },
+            Instruction::Sw { rs1: Register::R2, rs2: Register::R4, imm: 0 },
+            Instruction::Beq { rs1: Register::R4, rs2: Register::R5, offset: 10 },
+            Instruction::Jal { rd: Register::R1, offset: 100 },
+            Instruction::Cmov { rd: Register::R4, rs1: Register::R5, rs2: Register::R6 },
             Instruction::Ecall,
-            Instruction::Halt,
+            Instruction::Ebreak,
         ];
 
         for instr in instructions {
-            let encoded = encode(&instr);
-            assert_eq!(encoded & 0xC0000000, 0, "Instruction has bits set in 31:30");
+            let _encoded = encode(&instr);
+            // All u32 values fit in 32 bits by definition
         }
+    }
+
+    #[test]
+    fn test_negative_immediate() {
+        // Test sign extension for negative immediates
+        let instr = encode(&Instruction::Addi {
+            rd: Register::R4,
+            rs1: Register::R5,
+            imm: -1,
+        });
+
+        let imm_bits = (instr >> 15) & 0x1FFFF;
+        // -1 in 17-bit two's complement should be all 1s
+        assert_eq!(imm_bits, 0x1FFFF);
+    }
+
+    #[test]
+    fn test_opcode_values() {
+        // Verify opcodes match ZKIR v3.4 spec (using 7-bit field)
+        assert_eq!(Opcode::Add.to_u8(), 0x00);
+        assert_eq!(Opcode::Addi.to_u8(), 0x08);
+        assert_eq!(Opcode::And.to_u8(), 0x10);
+        assert_eq!(Opcode::Sll.to_u8(), 0x18);
+        assert_eq!(Opcode::Sltu.to_u8(), 0x20);
+        assert_eq!(Opcode::Cmov.to_u8(), 0x26);
+        assert_eq!(Opcode::Lb.to_u8(), 0x30);
+        assert_eq!(Opcode::Sb.to_u8(), 0x38);
+        assert_eq!(Opcode::Beq.to_u8(), 0x40);
+        assert_eq!(Opcode::Jal.to_u8(), 0x48);
+        assert_eq!(Opcode::Ecall.to_u8(), 0x50);
     }
 }

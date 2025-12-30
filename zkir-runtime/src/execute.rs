@@ -1,652 +1,866 @@
-//! Instruction execution for ZK IR v2.2
+//! Instruction execution for ZKIR v3.4
+//!
+//! Executes all 47 instructions with proper field arithmetic using Value40.
+//!
+//! # Bound Propagation
+//!
+//! For range check optimization, each instruction should propagate value bounds:
+//! 1. Read bounds from source registers
+//! 2. Compute resulting bound using ValueBound propagation methods
+//! 3. Write result bound to destination register
+//!
+//! Currently, bound propagation is partially implemented for demonstration.
+//! Full integration requires updating all 47 instructions.
 
-use zkir_spec::{Instruction, BABYBEAR_PRIME, MAX_30BIT};
+use crate::error::{RuntimeError, Result};
+use crate::memory::Memory;
+use crate::range_check::RangeCheckTracker;
 use crate::state::{VMState, HaltReason};
-use crate::io::IOHandler;
-use crate::error::RuntimeError;
-use crate::syscall::handle_syscall;
+use zkir_spec::{Instruction, Value, Value40, ValueBound};
 
-/// Mask to 30 bits
-#[inline]
-fn mask30(value: u32) -> u32 {
-    value & MAX_30BIT
-}
-
-/// Sign extend from 30 bits to i32
-#[inline]
-fn sign_extend_30(value: u32) -> i32 {
-    ((value << 2) as i32) >> 2
-}
-
-/// Execute single instruction
+/// Execute a single instruction
+///
+/// Updates the VM state and memory according to the instruction semantics.
+/// Optionally defers range checks when bounds exceed program width.
+///
+/// # Parameters
+/// - `inst`: Instruction to execute
+/// - `state`: VM state (registers, PC, bounds)
+/// - `memory`: Memory subsystem
+/// - `range_checker`: Optional range check tracker for deferred checking
+///
+/// Returns Ok(()) for normal execution, Err for runtime errors.
 pub fn execute(
-    instr: &Instruction,
+    inst: &Instruction,
     state: &mut VMState,
-    io: &mut IOHandler,
-) -> Result<(), RuntimeError> {
-    match instr {
-        // ========== R-type ALU (opcode = 0000) ==========
-
-        // Arithmetic
+    memory: &mut Memory,
+    range_checker: Option<&mut RangeCheckTracker>,
+) -> Result<()> {
+    match inst {
+        // ===== Arithmetic Operations =====
         Instruction::Add { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1).wrapping_add(state.read_reg(*rs2)));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.wrapping_add(b);
+
+            // Propagate bounds: result bound = max(a, b) + 1 bit
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_add(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+
+            // Defer range check if needed
+            if let Some(checker) = range_checker {
+                if checker.needs_check(&result_bound) {
+                    checker.defer(result, result_bound, state.pc);
+                }
+            }
+
+            state.advance_pc(4);
         }
 
         Instruction::Sub { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1).wrapping_sub(state.read_reg(*rs2)));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.wrapping_sub(b);
+
+            // Propagate bounds: result bound = max(a.bits, b.bits)
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_sub(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Mul { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1) as u64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = mask30((a * b) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.wrapping_mul(b);
+
+            // Propagate bounds: result bound = a.bits + b.bits
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_mul(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+
+            // Defer range check if needed
+            if let Some(checker) = range_checker {
+                if checker.needs_check(&result_bound) {
+                    checker.defer(result, result_bound, state.pc);
+                }
+            }
+
+            state.advance_pc(4);
         }
 
         Instruction::Mulh { rd, rs1, rs2 } => {
-            let a = sign_extend_30(state.read_reg(*rs1)) as i64;
-            let b = sign_extend_30(state.read_reg(*rs2)) as i64;
-            let result = mask30(((a * b) >> 30) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            let a = state.read_reg(*rs1);
+            let b = state.read_reg(*rs2);
+            // High 40 bits of 80-bit product
+            let product = (a as u128) * (b as u128);
+            let high = ((product >> 40) & 0xFF_FFFF_FFFF) as u64;
 
-        Instruction::Mulhu { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1) as u64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = mask30(((a * b) >> 30) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            // Propagate bounds: high bits have tighter bound (same as mul result)
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_mul(&bound_a, &bound_b);
 
-        Instruction::Mulhsu { rd, rs1, rs2 } => {
-            let a = sign_extend_30(state.read_reg(*rs1)) as i64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = mask30(((a as i64 * b as i64) >> 30) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            state.write_reg_with_bound(*rd, high, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Div { rd, rs1, rs2 } => {
-            let divisor = state.read_reg(*rs2);
+            let dividend = state.read_reg(*rs1) as i64;
+            let divisor = state.read_reg(*rs2) as i64;
             if divisor == 0 {
-                return Err(RuntimeError::Halt(HaltReason::DivisionByZero { pc: state.pc }));
+                return Err(RuntimeError::DivisionByZero { pc: state.pc });
             }
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(divisor);
-            let result = mask30((a / b) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let quotient = dividend.wrapping_div(divisor) as u64;
+
+            // Propagate bounds: quotient bound ≤ dividend bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_div(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, quotient, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Divu { rd, rs1, rs2 } => {
+            let dividend = state.read_reg(*rs1);
             let divisor = state.read_reg(*rs2);
             if divisor == 0 {
-                return Err(RuntimeError::Halt(HaltReason::DivisionByZero { pc: state.pc }));
+                return Err(RuntimeError::DivisionByZero { pc: state.pc });
             }
-            let result = mask30(state.read_reg(*rs1) / divisor);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let quotient = dividend / divisor;
+
+            // Propagate bounds: quotient bound ≤ dividend bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_div(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, quotient, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Rem { rd, rs1, rs2 } => {
-            let divisor = state.read_reg(*rs2);
+            let dividend = state.read_reg(*rs1) as i64;
+            let divisor = state.read_reg(*rs2) as i64;
             if divisor == 0 {
-                return Err(RuntimeError::Halt(HaltReason::DivisionByZero { pc: state.pc }));
+                return Err(RuntimeError::DivisionByZero { pc: state.pc });
             }
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(divisor);
-            let result = mask30((a % b) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let remainder = dividend.wrapping_rem(divisor) as u64;
+
+            // Propagate bounds: remainder bound < divisor bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_div(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, remainder, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Remu { rd, rs1, rs2 } => {
+            let dividend = state.read_reg(*rs1);
             let divisor = state.read_reg(*rs2);
             if divisor == 0 {
-                return Err(RuntimeError::Halt(HaltReason::DivisionByZero { pc: state.pc }));
+                return Err(RuntimeError::DivisionByZero { pc: state.pc });
             }
-            let result = mask30(state.read_reg(*rs1) % divisor);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let remainder = dividend % divisor;
+
+            // Propagate bounds: remainder bound < divisor bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_div(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, remainder, result_bound);
+            state.advance_pc(4);
         }
 
-        // Logic
+        Instruction::Addi { rd, rs1, imm } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(*imm as u64);
+            let result = a.wrapping_add(b);
+
+            // Propagate bounds: immediate has known constant bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_imm = ValueBound::from_constant(*imm as u64);
+            let result_bound = ValueBound::after_add(&bound_a, &bound_imm);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        // ===== Logical Operations =====
         Instruction::And { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1) & state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.bitwise_and(b);
 
-        Instruction::Andn { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1) & !state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            // Propagate bounds: AND reduces bound to min of inputs
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_and(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Or { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1) | state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.bitwise_or(b);
 
-        Instruction::Orn { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1) | !state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            // Propagate bounds: OR takes max of inputs
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_or(&bound_a, &bound_b);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Xor { rd, rs1, rs2 } => {
-            let result = mask30(state.read_reg(*rs1) ^ state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = a.bitwise_xor(b);
 
-        Instruction::Xnor { rd, rs1, rs2 } => {
-            let result = mask30(!(state.read_reg(*rs1) ^ state.read_reg(*rs2)));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
+            // Propagate bounds: XOR takes max of inputs
+            let bound_a = state.read_bound(*rs1);
+            let bound_b = state.read_bound(*rs2);
+            let result_bound = ValueBound::after_xor(&bound_a, &bound_b);
 
-        // Shift
-        Instruction::Sll { rd, rs1, rs2 } => {
-            let shamt = state.read_reg(*rs2) & 0x1F;
-            let result = mask30(state.read_reg(*rs1) << shamt);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Srl { rd, rs1, rs2 } => {
-            let shamt = state.read_reg(*rs2) & 0x1F;
-            let result = mask30(state.read_reg(*rs1) >> shamt);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Sra { rd, rs1, rs2 } => {
-            let shamt = state.read_reg(*rs2) & 0x1F;
-            let value = sign_extend_30(state.read_reg(*rs1));
-            let result = mask30((value >> shamt) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Rol { rd, rs1, rs2 } => {
-            let shamt = state.read_reg(*rs2) & 0x1F;
-            let value = state.read_reg(*rs1);
-            let result = mask30((value << shamt) | (value >> (30 - shamt)));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Ror { rd, rs1, rs2 } => {
-            let shamt = state.read_reg(*rs2) & 0x1F;
-            let value = state.read_reg(*rs1);
-            let result = mask30((value >> shamt) | (value << (30 - shamt)));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        // Compare
-        Instruction::Slt { rd, rs1, rs2 } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(state.read_reg(*rs2));
-            state.write_reg(*rd, if a < b { 1 } else { 0 });
-            state.pc += 4;
-        }
-
-        Instruction::Sltu { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1);
-            let b = state.read_reg(*rs2);
-            state.write_reg(*rd, if a < b { 1 } else { 0 });
-            state.pc += 4;
-        }
-
-        Instruction::Min { rd, rs1, rs2 } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(state.read_reg(*rs2));
-            state.write_reg(*rd, mask30(a.min(b) as u32));
-            state.pc += 4;
-        }
-
-        Instruction::Max { rd, rs1, rs2 } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(state.read_reg(*rs2));
-            state.write_reg(*rd, mask30(a.max(b) as u32));
-            state.pc += 4;
-        }
-
-        Instruction::Minu { rd, rs1, rs2 } => {
-            let result = state.read_reg(*rs1).min(state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Maxu { rd, rs1, rs2 } => {
-            let result = state.read_reg(*rs1).max(state.read_reg(*rs2));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        // Bit Manipulation
-        Instruction::Clz { rd, rs1, .. } => {
-            let value = state.read_reg(*rs1);
-            let result = if value == 0 { 30 } else { value.leading_zeros() - 2 };
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Ctz { rd, rs1, .. } => {
-            let value = state.read_reg(*rs1);
-            let result = if value == 0 { 30 } else { value.trailing_zeros() };
-            state.write_reg(*rd, result.min(30));
-            state.pc += 4;
-        }
-
-        Instruction::Cpop { rd, rs1, .. } => {
-            let value = state.read_reg(*rs1) & MAX_30BIT;
-            state.write_reg(*rd, value.count_ones());
-            state.pc += 4;
-        }
-
-        Instruction::Rev8 { rd, rs1, .. } => {
-            let value = state.read_reg(*rs1);
-            let result = mask30(value.swap_bytes());
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        // Conditional Move
-        Instruction::Cmovz { rd, rs1, rs2 } => {
-            if state.read_reg(*rs2) == 0 {
-                state.write_reg(*rd, state.read_reg(*rs1));
-            }
-            state.pc += 4;
-        }
-
-        Instruction::Cmovnz { rd, rs1, rs2 } => {
-            if state.read_reg(*rs2) != 0 {
-                state.write_reg(*rd, state.read_reg(*rs1));
-            }
-            state.pc += 4;
-        }
-
-        // Field Operations
-        Instruction::Fadd { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1) as u64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = ((a + b) % BABYBEAR_PRIME as u64) as u32;
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Fsub { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1) as u64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = ((a + BABYBEAR_PRIME as u64 - b) % BABYBEAR_PRIME as u64) as u32;
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Fmul { rd, rs1, rs2 } => {
-            let a = state.read_reg(*rs1) as u64;
-            let b = state.read_reg(*rs2) as u64;
-            let result = ((a * b) % BABYBEAR_PRIME as u64) as u32;
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Fneg { rd, rs1, .. } => {
-            let a = state.read_reg(*rs1);
-            let result = if a == 0 { 0 } else { BABYBEAR_PRIME - a };
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Finv { rd, rs1, .. } => {
-            let a = state.read_reg(*rs1);
-            if a == 0 {
-                return Err(RuntimeError::Halt(HaltReason::DivisionByZero { pc: state.pc }));
-            }
-            // Fermat's little theorem: a^(p-2) mod p
-            let result = field_inv(a, BABYBEAR_PRIME);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        // ========== I-type Immediate (opcode = 0001) ==========
-
-        Instruction::Addi { rd, rs1, imm } => {
-            let result = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Slti { rd, rs1, imm } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            state.write_reg(*rd, if a < (*imm as i32) { 1 } else { 0 });
-            state.pc += 4;
-        }
-
-        Instruction::Sltiu { rd, rs1, imm } => {
-            let a = state.read_reg(*rs1);
-            let b = *imm as u32;
-            state.write_reg(*rd, if a < b { 1 } else { 0 });
-            state.pc += 4;
-        }
-
-        Instruction::Xori { rd, rs1, imm } => {
-            let result = mask30(state.read_reg(*rs1) ^ (*imm as u32));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Ori { rd, rs1, imm } => {
-            let result = mask30(state.read_reg(*rs1) | (*imm as u32));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Andi { rd, rs1, imm } => {
-            let result = mask30(state.read_reg(*rs1) & (*imm as u32));
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(*imm as u64);
+            let result = a.bitwise_and(b);
+
+            // Propagate bounds: AND with immediate has tight bound
+            let bound_a = state.read_bound(*rs1);
+            let bound_imm = ValueBound::from_constant(*imm as u64);
+            let result_bound = ValueBound::after_and(&bound_a, &bound_imm);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Ori { rd, rs1, imm } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(*imm as u64);
+            let result = a.bitwise_or(b);
+
+            // Propagate bounds: OR with immediate
+            let bound_a = state.read_bound(*rs1);
+            let bound_imm = ValueBound::from_constant(*imm as u64);
+            let result_bound = ValueBound::after_or(&bound_a, &bound_imm);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Xori { rd, rs1, imm } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(*imm as u64);
+            let result = a.bitwise_xor(b);
+
+            // Propagate bounds: XOR with immediate
+            let bound_a = state.read_bound(*rs1);
+            let bound_imm = ValueBound::from_constant(*imm as u64);
+            let result_bound = ValueBound::after_xor(&bound_a, &bound_imm);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        // ===== Shift Operations =====
+        Instruction::Sll { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let shift = (state.read_reg(*rs2) & 0x3F) as u32; // Mask to 6 bits
+            let result = a.left_shift(shift);
+
+            // Propagate bounds: left shift increases bound (SHL needs max_bits param)
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_shl(&bound_val, shift, 40);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Srl { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let shift = (state.read_reg(*rs2) & 0x3F) as u32;
+            let result = a.right_shift(shift);
+
+            // Propagate bounds: right shift reduces bound
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_srl(&bound_val, shift);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Sra { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let shift = (state.read_reg(*rs2) & 0x3F) as u32;
+            let result = a.arithmetic_right_shift(shift, 40);
+
+            // Propagate bounds: arithmetic right shift preserves sign bit (needs data_bits)
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_sra(&bound_val, shift, 40);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Slli { rd, rs1, shamt } => {
-            let result = mask30(state.read_reg(*rs1) << shamt);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let result = a.left_shift(*shamt as u32);
+
+            // Propagate bounds: immediate shift amount is known
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_shl(&bound_val, *shamt as u32, 40);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Srli { rd, rs1, shamt } => {
-            let result = mask30(state.read_reg(*rs1) >> shamt);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let result = a.right_shift(*shamt as u32);
+
+            // Propagate bounds: immediate shift amount is known
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_srl(&bound_val, *shamt as u32);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Srai { rd, rs1, shamt } => {
-            let value = sign_extend_30(state.read_reg(*rs1));
-            let result = mask30((value >> shamt) as u32);
-            state.write_reg(*rd, result);
-            state.pc += 4;
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let result = a.arithmetic_right_shift(*shamt as u32, 40);
+
+            // Propagate bounds: immediate shift amount is known
+            let bound_val = state.read_bound(*rs1);
+            let result_bound = ValueBound::after_sra(&bound_val, *shamt as u32, 40);
+
+            state.write_reg_with_bound(*rd, result.to_u64(), result_bound);
+            state.advance_pc(4);
         }
 
-        // ========== Load (opcode = 0010) ==========
+        // ===== Comparison Operations =====
+        Instruction::Slt { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = if a.signed_lt(b, 40) { 1 } else { 0 };
 
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Sltu { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = if a.unsigned_lt(b) { 1 } else { 0 };
+
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Sge { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = if !a.signed_lt(b, 40) { 1 } else { 0 };
+
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Sgeu { rd, rs1, rs2 } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            let result = if !a.unsigned_lt(b) { 1 } else { 0 };
+
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Seq { rd, rs1, rs2 } => {
+            let a = state.read_reg(*rs1);
+            let b = state.read_reg(*rs2);
+            let result = if a == b { 1 } else { 0 };
+
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Sne { rd, rs1, rs2 } => {
+            let a = state.read_reg(*rs1);
+            let b = state.read_reg(*rs2);
+            let result = if a != b { 1 } else { 0 };
+
+            // Propagate bounds: result is always 0 or 1 (boolean)
+            let result_bound = ValueBound::after_cmp();
+
+            state.write_reg_with_bound(*rd, result, result_bound);
+            state.advance_pc(4);
+        }
+
+        // ===== Conditional Move Operations =====
+        Instruction::Cmov { rd, rs1, rs2 } => {
+            let cond = state.read_reg(*rs2) != 0;
+            if cond {
+                // Propagate bounds: conditional move uses source bound
+                // For prover, we conservatively use max of both paths
+                let bound_src = state.read_bound(*rs1);
+                let bound_dst = state.read_bound(*rd);
+                let result_bound = ValueBound::computed(bound_src.max_bits.max(bound_dst.max_bits));
+
+                state.write_reg_with_bound(*rd, state.read_reg(*rs1), result_bound);
+            }
+            state.advance_pc(4);
+        }
+
+        Instruction::Cmovz { rd, rs1, rs2 } => {
+            let cond = state.read_reg(*rs2) == 0;
+            if cond {
+                // Propagate bounds: conditional move uses source bound
+                // For prover, we conservatively use max of both paths
+                let bound_src = state.read_bound(*rs1);
+                let bound_dst = state.read_bound(*rd);
+                let result_bound = ValueBound::computed(bound_src.max_bits.max(bound_dst.max_bits));
+
+                state.write_reg_with_bound(*rd, state.read_reg(*rs1), result_bound);
+            }
+            state.advance_pc(4);
+        }
+
+        Instruction::Cmovnz { rd, rs1, rs2 } => {
+            let cond = state.read_reg(*rs2) != 0;
+            if cond {
+                // Propagate bounds: conditional move uses source bound
+                // For prover, we conservatively use max of both paths
+                let bound_src = state.read_bound(*rs1);
+                let bound_dst = state.read_bound(*rd);
+                let result_bound = ValueBound::computed(bound_src.max_bits.max(bound_dst.max_bits));
+
+                state.write_reg_with_bound(*rd, state.read_reg(*rs1), result_bound);
+            }
+            state.advance_pc(4);
+        }
+
+        // ===== Load Operations =====
         Instruction::Lb { rd, rs1, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.memory.load_byte_signed(addr, state.cycle)?;
-            state.write_reg(*rd, value);
-            state.pc += 4;
-        }
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let byte = memory.read_u8(addr)? as i8;
+            let value = byte as i64 as u64;
 
-        Instruction::Lh { rd, rs1, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.memory.load_half_signed(addr, state.cycle)?;
-            state.write_reg(*rd, value);
-            state.pc += 4;
-        }
+            // Propagate bounds: signed 8-bit load (sign-extended)
+            let result_bound = ValueBound::from_type_width(8);
 
-        Instruction::Lw { rd, rs1, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.memory.load_word(addr, state.cycle)?;
-            state.write_reg(*rd, mask30(value));
-            state.pc += 4;
+            state.write_reg_with_bound(*rd, value, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Lbu { rd, rs1, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.memory.load_byte(addr, state.cycle)?;
-            state.write_reg(*rd, value);
-            state.pc += 4;
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let byte = memory.read_u8(addr)?;
+            let value = byte as u64;
+
+            // Propagate bounds: unsigned 8-bit load
+            let result_bound = ValueBound::from_type_width(8);
+
+            state.write_reg_with_bound(*rd, value, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Lh { rd, rs1, imm } => {
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let halfword = memory.read_u16(addr)? as i16;
+            let value = halfword as i64 as u64;
+
+            // Propagate bounds: signed 16-bit load (sign-extended)
+            let result_bound = ValueBound::from_type_width(16);
+
+            state.write_reg_with_bound(*rd, value, result_bound);
+            state.advance_pc(4);
         }
 
         Instruction::Lhu { rd, rs1, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.memory.load_half(addr, state.cycle)?;
-            state.write_reg(*rd, value);
-            state.pc += 4;
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let halfword = memory.read_u16(addr)?;
+            let value = halfword as u64;
+
+            // Propagate bounds: unsigned 16-bit load
+            let result_bound = ValueBound::from_type_width(16);
+
+            state.write_reg_with_bound(*rd, value, result_bound);
+            state.advance_pc(4);
         }
 
-        // ========== Store (opcode = 0011) ==========
+        Instruction::Lw { rd, rs1, imm } => {
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let word = memory.read_u32(addr)?;
+            let value = word as u64;
 
+            // Propagate bounds: 32-bit load
+            let result_bound = ValueBound::from_type_width(32);
+
+            state.write_reg_with_bound(*rd, value, result_bound);
+            state.advance_pc(4);
+        }
+
+        Instruction::Ld { rd, rs1, imm } => {
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let dword = memory.read_u64(addr)?;
+
+            // Propagate bounds: 64-bit load (but limited to 40-bit program width)
+            let result_bound = ValueBound::from_type_width(40);
+
+            state.write_reg_with_bound(*rd, dword, result_bound);
+            state.advance_pc(4);
+        }
+
+        // ===== Store Operations =====
         Instruction::Sb { rs1, rs2, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.read_reg(*rs2);
-            state.memory.store_byte(addr, value, state.cycle)?;
-            state.pc += 4;
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let value = (state.read_reg(*rs2) & 0xFF) as u8;
+            memory.write_u8(addr, value)?;
+            state.advance_pc(4);
         }
 
         Instruction::Sh { rs1, rs2, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = state.read_reg(*rs2);
-            state.memory.store_half(addr, value, state.cycle)?;
-            state.pc += 4;
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let value = (state.read_reg(*rs2) & 0xFFFF) as u16;
+            memory.write_u16(addr, value)?;
+            state.advance_pc(4);
         }
 
         Instruction::Sw { rs1, rs2, imm } => {
-            let addr = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            let value = mask30(state.read_reg(*rs2));
-            state.memory.store_word(addr, value, state.cycle)?;
-            state.pc += 4;
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let value = (state.read_reg(*rs2) & 0xFFFFFFFF) as u32;
+            memory.write_u32(addr, value)?;
+            state.advance_pc(4);
         }
 
-        // ========== Branch (opcodes 0100-1001) ==========
-
-        Instruction::Beq { rs1, rs2, imm } => {
-            if state.read_reg(*rs1) == state.read_reg(*rs2) {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
+        Instruction::Sd { rs1, rs2, imm } => {
+            let addr = state.read_reg(*rs1).wrapping_add(*imm as u64);
+            let value = state.read_reg(*rs2);
+            memory.write_u64(addr, value)?;
+            state.advance_pc(4);
         }
 
-        Instruction::Bne { rs1, rs2, imm } => {
-            if state.read_reg(*rs1) != state.read_reg(*rs2) {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
-        }
-
-        Instruction::Blt { rs1, rs2, imm } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(state.read_reg(*rs2));
-            if a < b {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
-        }
-
-        Instruction::Bge { rs1, rs2, imm } => {
-            let a = sign_extend_30(state.read_reg(*rs1));
-            let b = sign_extend_30(state.read_reg(*rs2));
-            if a >= b {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
-        }
-
-        Instruction::Bltu { rs1, rs2, imm } => {
-            if state.read_reg(*rs1) < state.read_reg(*rs2) {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
-        }
-
-        Instruction::Bgeu { rs1, rs2, imm } => {
-            if state.read_reg(*rs1) >= state.read_reg(*rs2) {
-                state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-            } else {
-                state.pc += 4;
-            }
-        }
-
-        // ========== Upper Immediate (opcodes 1010-1011) ==========
-
-        Instruction::Lui { rd, imm } => {
-            let result = mask30((*imm as u32) << 12);
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        Instruction::Auipc { rd, imm } => {
-            let result = mask30(state.pc.wrapping_add((*imm as u32) << 12));
-            state.write_reg(*rd, result);
-            state.pc += 4;
-        }
-
-        // ========== Jump (opcodes 1100-1101) ==========
-
-        Instruction::Jal { rd, imm } => {
-            state.write_reg(*rd, mask30(state.pc + 4));
-            state.pc = mask30(state.pc.wrapping_add(*imm as u32));
-        }
-
-        Instruction::Jalr { rd, rs1, imm } => {
-            let target = mask30(state.read_reg(*rs1).wrapping_add(*imm as u32));
-            state.write_reg(*rd, mask30(state.pc + 4));
-            state.pc = target;
-        }
-
-        // ========== ZK Operations (opcode = 1110) ==========
-
-        Instruction::Read { rd } => {
-            match io.read() {
-                Some(value) => {
-                    state.write_reg(*rd, mask30(value));
-                    state.pc += 4;
-                }
-                None => {
-                    return Err(RuntimeError::Halt(HaltReason::InputExhausted));
-                }
-            }
-        }
-
-        Instruction::Write { rs1 } => {
-            let value = state.read_reg(*rs1);
-            io.write(value);
-            state.pc += 4;
-        }
-
-        Instruction::Hint { rd } => {
-            match io.read_hint() {
-                Some(value) => {
-                    state.write_reg(*rd, mask30(value));
-                    state.pc += 4;
-                }
-                None => {
-                    // Hints are optional, write 0 if not available
-                    state.write_reg(*rd, 0);
-                    state.pc += 4;
-                }
-            }
-        }
-
-        Instruction::Commit { rs1 } => {
-            let value = state.read_reg(*rs1);
-            io.commit(value);
-            state.pc += 4;
-        }
-
-        Instruction::AssertEq { rs1, rs2 } => {
-            let a = state.read_reg(*rs1);
-            let b = state.read_reg(*rs2);
-            if a != b {
-                return Err(RuntimeError::Halt(HaltReason::AssertionFailed {
-                    pc: state.pc,
-                    msg: format!("ASSERT_EQ failed: {} != {}", a, b),
-                }));
-            }
-            state.pc += 4;
-        }
-
-        Instruction::AssertNe { rs1, rs2 } => {
+        // ===== Branch Operations =====
+        Instruction::Beq { rs1, rs2, offset } => {
             let a = state.read_reg(*rs1);
             let b = state.read_reg(*rs2);
             if a == b {
-                return Err(RuntimeError::Halt(HaltReason::AssertionFailed {
-                    pc: state.pc,
-                    msg: format!("ASSERT_NE failed: {} == {}", a, b),
-                }));
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
             }
-            state.pc += 4;
         }
 
-        Instruction::AssertZero { rs1 } => {
-            let value = state.read_reg(*rs1);
-            if value != 0 {
-                return Err(RuntimeError::Halt(HaltReason::AssertionFailed {
-                    pc: state.pc,
-                    msg: format!("ASSERT_ZERO failed: {} != 0", value),
-                }));
+        Instruction::Bne { rs1, rs2, offset } => {
+            let a = state.read_reg(*rs1);
+            let b = state.read_reg(*rs2);
+            if a != b {
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
             }
-            state.pc += 4;
         }
 
-        Instruction::RangeCheck { rs1, bits } => {
-            let value = state.read_reg(*rs1);
-            let max = (1u32 << bits) - 1;
-            if value > max {
-                return Err(RuntimeError::Halt(HaltReason::AssertionFailed {
-                    pc: state.pc,
-                    msg: format!("RANGE_CHECK failed: {} > {} (max for {} bits)", value, max, bits),
-                }));
+        Instruction::Blt { rs1, rs2, offset } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            if a.signed_lt(b, 40) {
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
             }
-            state.pc += 4;
         }
 
-        Instruction::Debug { rs1 } => {
-            let value = state.read_reg(*rs1);
-            tracing::debug!("DEBUG at PC={:08X}: {}", state.pc, value);
-            state.pc += 4;
+        Instruction::Bge { rs1, rs2, offset } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            if !a.signed_lt(b, 40) {
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
+            }
         }
 
-        Instruction::Halt => {
-            state.halt(HaltReason::Halt);
+        Instruction::Bltu { rs1, rs2, offset } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            if a.unsigned_lt(b) {
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
+            }
         }
 
-        // ========== System (opcode = 1111) ==========
+        Instruction::Bgeu { rs1, rs2, offset } => {
+            let a = Value40::from_u64(state.read_reg(*rs1));
+            let b = Value40::from_u64(state.read_reg(*rs2));
+            if !a.unsigned_lt(b) {
+                state.advance_pc(*offset as i64);
+            } else {
+                state.advance_pc(4);
+            }
+        }
 
+        // ===== Jump Operations =====
+        Instruction::Jal { rd, offset } => {
+            let return_addr = state.pc + 4;
+
+            // Propagate bounds: return address is a PC value (tight bound)
+            let result_bound = ValueBound::from_constant(return_addr);
+
+            state.write_reg_with_bound(*rd, return_addr, result_bound);
+            state.advance_pc(*offset as i64);
+        }
+
+        Instruction::Jalr { rd, rs1, imm } => {
+            let return_addr = state.pc + 4;
+            let target = state.read_reg(*rs1).wrapping_add(*imm as u64);
+
+            // Propagate bounds: return address is a PC value (tight bound)
+            let result_bound = ValueBound::from_constant(return_addr);
+
+            state.write_reg_with_bound(*rd, return_addr, result_bound);
+            state.pc = target & !1; // Clear LSB for alignment
+        }
+
+        // ===== System Operations =====
         Instruction::Ecall => {
-            handle_syscall(state, io)?;
-            state.pc += 4;
+            // Syscall is handled externally by vm.rs
+            // Just advance PC here
+            state.advance_pc(4);
         }
 
         Instruction::Ebreak => {
-            // Breakpoint for debugging
-            tracing::debug!("EBREAK at PC={:08X}", state.pc);
-            state.pc += 4;
+            state.halt(HaltReason::Ebreak);
         }
     }
 
     Ok(())
 }
 
-/// Compute modular inverse using Fermat's little theorem: a^(p-2) mod p
-fn field_inv(a: u32, p: u32) -> u32 {
-    // Fast exponentiation
-    let mut result = 1u64;
-    let mut base = a as u64;
-    let mut exp = (p - 2) as u64;
-    let modulus = p as u64;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zkir_spec::Register;
 
-    while exp > 0 {
-        if exp & 1 == 1 {
-            result = (result * base) % modulus;
-        }
-        base = (base * base) % modulus;
-        exp >>= 1;
+    fn setup() -> (VMState, Memory) {
+        let state = VMState::new(0);
+        let memory = Memory::new();
+        (state, memory)
     }
 
-    result as u32
+    #[test]
+    fn test_arithmetic_add() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 100);
+        state.write_reg(Register::R2, 50);
+
+        let inst = Instruction::Add {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 150);
+        assert_eq!(state.pc, 4);
+    }
+
+    #[test]
+    fn test_arithmetic_sub() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 100);
+        state.write_reg(Register::R2, 30);
+
+        let inst = Instruction::Sub {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 70);
+    }
+
+    #[test]
+    fn test_logical_and() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 0b1100);
+        state.write_reg(Register::R2, 0b1010);
+
+        let inst = Instruction::And {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 0b1000);
+    }
+
+    #[test]
+    fn test_shift_left() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 0b11);
+        state.write_reg(Register::R2, 4);
+
+        let inst = Instruction::Sll {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 0b110000);
+    }
+
+    #[test]
+    fn test_comparison_slt() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 10);
+        state.write_reg(Register::R2, 20);
+
+        let inst = Instruction::Slt {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 1);
+    }
+
+    #[test]
+    fn test_load_store() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 0x1000);
+        state.write_reg(Register::R2, 0x12345678);
+
+        // Store word
+        let inst = Instruction::Sw {
+            rs1: Register::R1,
+            rs2: Register::R2,
+            imm: 0,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        // Load word
+        let inst = Instruction::Lw {
+            rd: Register::R3,
+            rs1: Register::R1,
+            imm: 0,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R3), 0x12345678);
+    }
+
+    #[test]
+    fn test_branch_taken() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 10);
+        state.write_reg(Register::R2, 10);
+
+        let inst = Instruction::Beq {
+            rs1: Register::R1,
+            rs2: Register::R2,
+            offset: 100,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.pc as i64, 100);
+    }
+
+    #[test]
+    fn test_branch_not_taken() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 10);
+        state.write_reg(Register::R2, 20);
+
+        let inst = Instruction::Beq {
+            rs1: Register::R1,
+            rs2: Register::R2,
+            offset: 100,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.pc, 4);
+    }
+
+    #[test]
+    fn test_jal() {
+        let (mut state, mut memory) = setup();
+
+        let inst = Instruction::Jal {
+            rd: Register::R1,
+            offset: 1000,
+        };
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert_eq!(state.read_reg(Register::R1), 4); // Return address
+        assert_eq!(state.pc as i64, 1000);
+    }
+
+    #[test]
+    fn test_ebreak() {
+        let (mut state, mut memory) = setup();
+
+        let inst = Instruction::Ebreak;
+        execute(&inst, &mut state, &mut memory, None).unwrap();
+
+        assert!(state.is_halted());
+        assert_eq!(state.halt_reason, Some(HaltReason::Ebreak));
+    }
+
+    #[test]
+    fn test_division_by_zero() {
+        let (mut state, mut memory) = setup();
+        state.write_reg(Register::R1, 100);
+        state.write_reg(Register::R2, 0);
+
+        let inst = Instruction::Div {
+            rd: Register::R3,
+            rs1: Register::R1,
+            rs2: Register::R2,
+        };
+        let result = execute(&inst, &mut state, &mut memory, None);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::DivisionByZero { .. }
+        ));
+    }
 }

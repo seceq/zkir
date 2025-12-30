@@ -259,7 +259,7 @@ cargo test -p zkir-runtime      # 17 tests
 # Run with output
 cargo test -- --nocapture
 
-# Current test status: ✅ All 93 tests passing
+# All 93 tests passing
 ```
 
 ## Contributing

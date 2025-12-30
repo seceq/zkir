@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Disassembler for ZK IR v2.1"
+description = "ZKIR v3.4 - Variable limb architecture disassembler"
 
 [dependencies]
 zkir-spec = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+zkir-assembler = { path = "../zkir-assembler" }

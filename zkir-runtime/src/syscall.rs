@@ -1,376 +1,319 @@
-//! Syscall handlers for ZK IR v2.2
+//! Syscall handling for ZKIR v3.4
+//!
+//! Implements I/O and crypto syscalls:
+//! - Exit (0): Halt with exit code
+//! - Read (1): Read from input tape
+//! - Write (2): Write to output tape
+//! - SHA-256 (3): Cryptographic hash
+//! - Poseidon2 (4): ZK-friendly hash
+//! - Keccak-256 (5): Ethereum-compatible hash
+//! - Blake3 (6): High-performance hash
 
-use zkir_spec::{Register, BABYBEAR_PRIME, MAX_30BIT};
+use crate::error::{RuntimeError, Result};
 use crate::state::{VMState, HaltReason};
-use crate::io::IOHandler;
-use crate::error::RuntimeError;
+use crate::memory::Memory;
+use crate::crypto;
 
-/// Syscall numbers (stored in a7)
-pub mod syscall_nums {
-    // Core syscalls
-    pub const SYS_EXIT: u32 = 0x01;
-    pub const SYS_READ: u32 = 0x10;
-    pub const SYS_WRITE: u32 = 0x11;
+/// Syscall numbers
+pub const SYSCALL_EXIT: u64 = 0;
+pub const SYSCALL_READ: u64 = 1;
+pub const SYSCALL_WRITE: u64 = 2;
+pub const SYSCALL_SHA256: u64 = 3;
+pub const SYSCALL_POSEIDON2: u64 = 4;
+pub const SYSCALL_KECCAK256: u64 = 5;
+pub const SYSCALL_BLAKE3: u64 = 6;
 
-    // Cryptographic syscalls
-    pub const SYS_POSEIDON2: u32 = 0x12;
-    pub const SYS_POSEIDON: u32 = 0x13;
-    pub const SYS_SHA256_INIT: u32 = 0x20;
-    pub const SYS_SHA256_UPDATE: u32 = 0x21;
-    pub const SYS_SHA256_FINALIZE: u32 = 0x22;
+/// I/O handler for syscalls
+///
+/// Maintains input and output tapes for the VM.
+#[derive(Debug, Clone)]
+pub struct IOHandler {
+    /// Input tape (consumed sequentially)
+    inputs: Vec<u64>,
 
-    // Memory syscalls
-    pub const SYS_MEMCPY: u32 = 0x30;
-    pub const SYS_MEMSET: u32 = 0x31;
-    pub const SYS_BRK: u32 = 0x32;
+    /// Current position in input tape
+    input_pos: usize,
+
+    /// Output tape (written sequentially)
+    outputs: Vec<u64>,
 }
 
-/// Handle ECALL syscall
-pub fn handle_syscall(
-    state: &mut VMState,
-    io: &mut IOHandler,
-) -> Result<(), RuntimeError> {
-    let syscall_num = state.read_reg(Register::A7);
+impl IOHandler {
+    /// Create new I/O handler with given inputs
+    pub fn new(inputs: Vec<u64>) -> Self {
+        Self {
+            inputs,
+            input_pos: 0,
+            outputs: Vec::new(),
+        }
+    }
+
+    /// Read next value from input tape
+    ///
+    /// Returns 0 if input is exhausted.
+    pub fn read(&mut self) -> u64 {
+        if self.input_pos < self.inputs.len() {
+            let value = self.inputs[self.input_pos];
+            self.input_pos += 1;
+            value
+        } else {
+            0 // Return 0 if no more inputs
+        }
+    }
+
+    /// Write value to output tape
+    pub fn write(&mut self, value: u64) {
+        self.outputs.push(value);
+    }
+
+    /// Get outputs
+    pub fn outputs(&self) -> &[u64] {
+        &self.outputs
+    }
+
+    /// Check if all inputs have been consumed
+    pub fn inputs_exhausted(&self) -> bool {
+        self.input_pos >= self.inputs.len()
+    }
+}
+
+/// Handle a syscall
+///
+/// Syscall convention:
+/// - a0 (R10): syscall number
+/// - a1 (R11): first argument (input_ptr for crypto)
+/// - a2 (R12): second argument (input_len for crypto)
+/// - a3 (R13): third argument (output_ptr for crypto)
+/// - Return value in a0 (R10)
+///
+/// Crypto syscalls:
+/// - SHA-256: a1=input_ptr, a2=input_len, a3=output_ptr (32 bytes)
+/// - Poseidon2: a1=input_ptr, a2=input_len, a3=output_ptr
+/// - Keccak-256: a1=input_ptr, a2=input_len, a3=output_ptr (32 bytes)
+/// - Blake3: a1=input_ptr, a2=input_len, a3=output_ptr (32 bytes)
+pub fn handle_syscall(state: &mut VMState, memory: &mut Memory, io: &mut IOHandler) -> Result<()> {
+    use zkir_spec::Register;
+
+    let syscall_num = state.read_reg(Register::R10); // a0
 
     match syscall_num {
-        syscall_nums::SYS_EXIT => sys_exit(state)?,
-        syscall_nums::SYS_READ => sys_read(state, io)?,
-        syscall_nums::SYS_WRITE => sys_write(state, io)?,
-        syscall_nums::SYS_POSEIDON2 => sys_poseidon2(state)?,
-        syscall_nums::SYS_POSEIDON => sys_poseidon(state)?,
-        syscall_nums::SYS_SHA256_INIT => sys_sha256_init(state)?,
-        syscall_nums::SYS_SHA256_UPDATE => sys_sha256_update(state)?,
-        syscall_nums::SYS_SHA256_FINALIZE => sys_sha256_finalize(state)?,
-        syscall_nums::SYS_MEMCPY => sys_memcpy(state)?,
-        syscall_nums::SYS_MEMSET => sys_memset(state)?,
-        syscall_nums::SYS_BRK => sys_brk(state)?,
-        _ => {
-            return Err(RuntimeError::Halt(HaltReason::SyscallError {
-                code: syscall_num,
-                msg: format!("Unknown syscall: 0x{:02X}", syscall_num),
-            }));
-        }
-    }
-
-    Ok(())
-}
-
-// ========== Core Syscalls ==========
-
-/// SYS_EXIT (0x01): Exit with code in a0
-fn sys_exit(state: &mut VMState) -> Result<(), RuntimeError> {
-    let exit_code = state.read_reg(Register::A0);
-
-    if exit_code == 0 {
-        // Normal exit
-        state.halt(HaltReason::Halt);
-    } else {
-        // Exit with error code
-        state.halt(HaltReason::SyscallError {
-            code: exit_code,
-            msg: format!("Program exited with code {}", exit_code),
-        });
-    }
-
-    Ok(())
-}
-
-/// SYS_READ (0x10): Read public input into a0
-fn sys_read(state: &mut VMState, io: &mut IOHandler) -> Result<(), RuntimeError> {
-    match io.read() {
-        Some(value) => {
-            state.write_reg(Register::A0, value & MAX_30BIT);
+        SYSCALL_EXIT => {
+            // Exit with code from a1 (R11)
+            let exit_code = state.read_reg(Register::R11);
+            state.halt(HaltReason::Exit(exit_code));
             Ok(())
         }
-        None => Err(RuntimeError::Halt(HaltReason::InputExhausted)),
-    }
-}
 
-/// SYS_WRITE (0x11): Write a0 to public output
-fn sys_write(state: &mut VMState, io: &mut IOHandler) -> Result<(), RuntimeError> {
-    let value = state.read_reg(Register::A0);
-    io.write(value);
-    Ok(())
-}
-
-// ========== Cryptographic Syscalls ==========
-
-/// SYS_POSEIDON2 (0x12): Poseidon2 permutation
-/// Input: a0 = pointer to 12-word state array
-/// Output: State modified in-place
-fn sys_poseidon2(state: &mut VMState) -> Result<(), RuntimeError> {
-    let ptr = state.read_reg(Register::A0);
-
-    // Load 12-word state
-    let mut poseidon_state = [0u32; 12];
-    for i in 0..12 {
-        let addr = (ptr + (i * 4) as u32) & MAX_30BIT;
-        poseidon_state[i as usize] = state.memory.load_word(addr, state.cycle)?;
-    }
-
-    // Apply Poseidon2 permutation
-    poseidon2_permutation(&mut poseidon_state);
-
-    // Store result back
-    for i in 0..12 {
-        let addr = (ptr + (i * 4) as u32) & MAX_30BIT;
-        state.memory.store_word(addr, poseidon_state[i as usize], state.cycle)?;
-    }
-
-    Ok(())
-}
-
-/// SYS_POSEIDON (0x13): Original Poseidon hash
-/// Input: a0 = pointer to state array, a1 = number of elements
-/// Output: State modified in-place
-fn sys_poseidon(state: &mut VMState) -> Result<(), RuntimeError> {
-    let ptr = state.read_reg(Register::A0);
-    let count = state.read_reg(Register::A1).min(16); // Limit to reasonable size
-
-    // Load state
-    let mut poseidon_state = vec![0u32; count as usize];
-    for i in 0..count {
-        let addr = (ptr + (i * 4)) & MAX_30BIT;
-        poseidon_state[i as usize] = state.memory.load_word(addr, state.cycle)?;
-    }
-
-    // Apply Poseidon permutation (simplified - real implementation would use proper constants)
-    poseidon_permutation(&mut poseidon_state);
-
-    // Store result back
-    for i in 0..count {
-        let addr = (ptr + (i * 4)) & MAX_30BIT;
-        state.memory.store_word(addr, poseidon_state[i as usize], state.cycle)?;
-    }
-
-    Ok(())
-}
-
-/// SHA-256 context stored in memory
-struct Sha256Context {
-    state: [u32; 8],
-    buffer: [u8; 64],
-    buffer_len: usize,
-    total_len: u64,
-}
-
-/// SYS_SHA256_INIT (0x20): Initialize SHA-256 context
-/// Input: a0 = pointer to context (32 bytes minimum)
-fn sys_sha256_init(state: &mut VMState) -> Result<(), RuntimeError> {
-    let ptr = state.read_reg(Register::A0);
-
-    // SHA-256 initial hash values
-    let initial_state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    // Store initial state
-    for i in 0..8 {
-        let addr = (ptr + (i * 4)) & MAX_30BIT;
-        state.memory.store_word(addr, initial_state[i as usize], state.cycle)?;
-    }
-
-    // Clear buffer length and total length (stored after state)
-    let buffer_len_addr = (ptr + 32) & MAX_30BIT;
-    let total_len_addr = (ptr + 36) & MAX_30BIT;
-    state.memory.store_word(buffer_len_addr, 0, state.cycle)?;
-    state.memory.store_word(total_len_addr, 0, state.cycle)?;
-
-    Ok(())
-}
-
-/// SYS_SHA256_UPDATE (0x21): Update SHA-256 with data
-/// Input: a0 = context pointer, a1 = data pointer, a2 = length
-fn sys_sha256_update(state: &mut VMState) -> Result<(), RuntimeError> {
-    let _ctx_ptr = state.read_reg(Register::A0);
-    let _data_ptr = state.read_reg(Register::A1);
-    let _len = state.read_reg(Register::A2);
-
-    // TODO: Implement full SHA-256 update
-    // For now, this is a placeholder
-    tracing::warn!("SHA256_UPDATE not fully implemented");
-
-    Ok(())
-}
-
-/// SYS_SHA256_FINALIZE (0x22): Finalize SHA-256 and get digest
-/// Input: a0 = context pointer, a1 = output pointer (32 bytes)
-fn sys_sha256_finalize(state: &mut VMState) -> Result<(), RuntimeError> {
-    let ctx_ptr = state.read_reg(Register::A0);
-    let out_ptr = state.read_reg(Register::A1);
-
-    // Read current state
-    let mut digest = [0u32; 8];
-    for i in 0..8 {
-        let addr = (ctx_ptr + (i * 4)) & MAX_30BIT;
-        digest[i as usize] = state.memory.load_word(addr, state.cycle)?;
-    }
-
-    // TODO: Apply final padding and compression
-    // For now, just copy the state as digest
-
-    // Write digest to output
-    for i in 0..8 {
-        let addr = (out_ptr + (i * 4)) & MAX_30BIT;
-        state.memory.store_word(addr, digest[i as usize], state.cycle)?;
-    }
-
-    Ok(())
-}
-
-// ========== Memory Syscalls ==========
-
-/// SYS_MEMCPY (0x30): Copy memory region
-/// Input: a0 = dest, a1 = src, a2 = length (in words)
-fn sys_memcpy(state: &mut VMState) -> Result<(), RuntimeError> {
-    let dest = state.read_reg(Register::A0);
-    let src = state.read_reg(Register::A1);
-    let len = state.read_reg(Register::A2).min(1024); // Limit to reasonable size
-
-    for i in 0..len {
-        let src_addr = (src + (i * 4)) & MAX_30BIT;
-        let dest_addr = (dest + (i * 4)) & MAX_30BIT;
-        let value = state.memory.load_word(src_addr, state.cycle)?;
-        state.memory.store_word(dest_addr, value, state.cycle)?;
-    }
-
-    state.write_reg(Register::A0, dest);
-    Ok(())
-}
-
-/// SYS_MEMSET (0x31): Set memory region
-/// Input: a0 = dest, a1 = value, a2 = length (in words)
-fn sys_memset(state: &mut VMState) -> Result<(), RuntimeError> {
-    let dest = state.read_reg(Register::A0);
-    let value = state.read_reg(Register::A1) & MAX_30BIT;
-    let len = state.read_reg(Register::A2).min(1024); // Limit to reasonable size
-
-    for i in 0..len {
-        let addr = (dest + (i * 4)) & MAX_30BIT;
-        state.memory.store_word(addr, value, state.cycle)?;
-    }
-
-    state.write_reg(Register::A0, dest);
-    Ok(())
-}
-
-/// SYS_BRK (0x32): Adjust heap break
-/// Input: a0 = new break address
-/// Output: a0 = actual break address
-fn sys_brk(_state: &mut VMState) -> Result<(), RuntimeError> {
-    // TODO: Implement heap management
-    // For now, this is a placeholder
-    tracing::warn!("SYS_BRK not fully implemented");
-    Ok(())
-}
-
-// ========== Poseidon2 Implementation ==========
-
-/// Poseidon2 permutation for Baby Bear field
-/// This is a simplified placeholder implementation
-fn poseidon2_permutation(state: &mut [u32; 12]) {
-    const ROUNDS_FULL: usize = 8;
-    const ROUNDS_PARTIAL: usize = 13;
-
-    // Full rounds (beginning)
-    for _ in 0..ROUNDS_FULL / 2 {
-        add_round_constants(state);
-        apply_sbox_full(state);
-        apply_mds(state);
-    }
-
-    // Partial rounds
-    for _ in 0..ROUNDS_PARTIAL {
-        add_round_constants(state);
-        apply_sbox_partial(state);
-        apply_mds(state);
-    }
-
-    // Full rounds (end)
-    for _ in 0..ROUNDS_FULL / 2 {
-        add_round_constants(state);
-        apply_sbox_full(state);
-        apply_mds(state);
-    }
-}
-
-/// Add round constants (simplified - should use proper constants)
-fn add_round_constants(state: &mut [u32; 12]) {
-    // Placeholder: add dummy constants
-    for (i, s) in state.iter_mut().enumerate() {
-        *s = field_add(*s, (i as u32 * 123456789) % BABYBEAR_PRIME);
-    }
-}
-
-/// Apply S-box to all elements
-fn apply_sbox_full(state: &mut [u32; 12]) {
-    for s in state.iter_mut() {
-        *s = sbox(*s);
-    }
-}
-
-/// Apply S-box to first element only
-fn apply_sbox_partial(state: &mut [u32; 12]) {
-    state[0] = sbox(state[0]);
-}
-
-/// S-box: x^7 mod p
-fn sbox(x: u32) -> u32 {
-    let x = x as u64;
-    let p = BABYBEAR_PRIME as u64;
-
-    let x2 = (x * x) % p;
-    let x3 = (x2 * x) % p;
-    let x4 = (x2 * x2) % p;
-    let x7 = (x4 * x3) % p;
-
-    x7 as u32
-}
-
-/// Apply MDS matrix (simplified - should use proper MDS matrix)
-fn apply_mds(state: &mut [u32; 12]) {
-    let mut new_state = [0u32; 12];
-
-    // Simple mixing (not cryptographically secure, just for demonstration)
-    for i in 0..12 {
-        let mut sum = 0u64;
-        for j in 0..12 {
-            let coeff = ((i + j + 1) * 1000000007) % BABYBEAR_PRIME;
-            sum += (state[j as usize] as u64 * coeff as u64) % BABYBEAR_PRIME as u64;
-        }
-        new_state[i as usize] = (sum % BABYBEAR_PRIME as u64) as u32;
-    }
-
-    state.copy_from_slice(&new_state);
-}
-
-/// Field addition modulo Baby Bear prime
-fn field_add(a: u32, b: u32) -> u32 {
-    ((a as u64 + b as u64) % BABYBEAR_PRIME as u64) as u32
-}
-
-// ========== Poseidon Implementation ==========
-
-/// Original Poseidon permutation (simplified placeholder)
-fn poseidon_permutation(state: &mut [u32]) {
-    let rounds = 8;
-
-    for _ in 0..rounds {
-        // Add round constants
-        for (i, s) in state.iter_mut().enumerate() {
-            *s = field_add(*s, (i as u32 * 987654321) % BABYBEAR_PRIME);
+        SYSCALL_READ => {
+            // Read from input tape into a0 (R10)
+            let value = io.read();
+            state.write_reg(Register::R10, value);
+            Ok(())
         }
 
-        // Apply S-box
-        for s in state.iter_mut() {
-            *s = sbox(*s);
+        SYSCALL_WRITE => {
+            // Write from a1 (R11) to output tape
+            let value = state.read_reg(Register::R11);
+            io.write(value);
+            Ok(())
         }
 
-        // Simple mixing
-        let sum: u64 = state.iter().map(|&x| x as u64).sum();
-        for s in state.iter_mut() {
-            *s = field_add(*s, (sum % BABYBEAR_PRIME as u64) as u32);
+        SYSCALL_SHA256 => {
+            // SHA-256: a1=input_ptr, a2=input_len, a3=output_ptr
+            let input_ptr = state.read_reg(Register::R11);
+            let input_len = state.read_reg(Register::R12);
+            let output_ptr = state.read_reg(Register::R13);
+
+            let bound = crypto::sha256_hash(memory, input_ptr, input_len, output_ptr)?;
+
+            // Store bound in state for range check optimization (via special bound tracking)
+            // For now, return success in a0
+            state.write_reg(Register::R10, 0);
+
+            // Write output bound to a designated register (R14 = t4)
+            // This allows the program to track crypto output bounds
+            state.write_bound(Register::R14, bound);
+
+            Ok(())
+        }
+
+        SYSCALL_POSEIDON2 => {
+            // Poseidon2: a1=input_ptr, a2=input_len, a3=output_ptr
+            let input_ptr = state.read_reg(Register::R11);
+            let input_len = state.read_reg(Register::R12);
+            let output_ptr = state.read_reg(Register::R13);
+
+            let _bound = crypto::poseidon2_hash(memory, input_ptr, input_len, output_ptr)?;
+            state.write_reg(Register::R10, 0);
+            Ok(())
+        }
+
+        SYSCALL_KECCAK256 => {
+            // Keccak-256: a1=input_ptr, a2=input_len, a3=output_ptr
+            let input_ptr = state.read_reg(Register::R11);
+            let input_len = state.read_reg(Register::R12);
+            let output_ptr = state.read_reg(Register::R13);
+
+            let _bound = crypto::keccak256_hash(memory, input_ptr, input_len, output_ptr)?;
+            state.write_reg(Register::R10, 0);
+            Ok(())
+        }
+
+        SYSCALL_BLAKE3 => {
+            // Blake3: a1=input_ptr, a2=input_len, a3=output_ptr
+            let input_ptr = state.read_reg(Register::R11);
+            let input_len = state.read_reg(Register::R12);
+            let output_ptr = state.read_reg(Register::R13);
+
+            let _bound = crypto::blake3_hash(memory, input_ptr, input_len, output_ptr)?;
+            state.write_reg(Register::R10, 0);
+            Ok(())
+        }
+
+        _ => Err(RuntimeError::InvalidSyscall {
+            syscall: syscall_num,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zkir_spec::Register;
+
+    #[test]
+    fn test_io_handler_read() {
+        let mut io = IOHandler::new(vec![10, 20, 30]);
+
+        assert_eq!(io.read(), 10);
+        assert_eq!(io.read(), 20);
+        assert_eq!(io.read(), 30);
+        assert_eq!(io.read(), 0); // Exhausted, returns 0
+        assert!(io.inputs_exhausted());
+    }
+
+    #[test]
+    fn test_io_handler_write() {
+        let mut io = IOHandler::new(vec![]);
+
+        io.write(100);
+        io.write(200);
+        io.write(300);
+
+        assert_eq!(io.outputs(), &[100, 200, 300]);
+    }
+
+    #[test]
+    fn test_syscall_exit() {
+        let mut state = VMState::new(0);
+        let mut memory = Memory::new();
+        let mut io = IOHandler::new(vec![]);
+
+        // Set up exit syscall with code 42
+        state.write_reg(Register::R10, SYSCALL_EXIT);
+        state.write_reg(Register::R11, 42);
+
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        assert!(state.is_halted());
+        assert_eq!(state.halt_reason, Some(HaltReason::Exit(42)));
+    }
+
+    #[test]
+    fn test_syscall_read() {
+        let mut state = VMState::new(0);
+        let mut memory = Memory::new();
+        let mut io = IOHandler::new(vec![123, 456]);
+
+        // Read syscall
+        state.write_reg(Register::R10, SYSCALL_READ);
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        assert_eq!(state.read_reg(Register::R10), 123);
+
+        // Read again
+        state.write_reg(Register::R10, SYSCALL_READ);
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        assert_eq!(state.read_reg(Register::R10), 456);
+    }
+
+    #[test]
+    fn test_syscall_write() {
+        let mut state = VMState::new(0);
+        let mut memory = Memory::new();
+        let mut io = IOHandler::new(vec![]);
+
+        // Write syscall
+        state.write_reg(Register::R10, SYSCALL_WRITE);
+        state.write_reg(Register::R11, 999);
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        assert_eq!(io.outputs(), &[999]);
+
+        // Write again
+        state.write_reg(Register::R10, SYSCALL_WRITE);
+        state.write_reg(Register::R11, 888);
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        assert_eq!(io.outputs(), &[999, 888]);
+    }
+
+    #[test]
+    fn test_invalid_syscall() {
+        let mut state = VMState::new(0);
+        let mut memory = Memory::new();
+        let mut io = IOHandler::new(vec![]);
+
+        // Invalid syscall number
+        state.write_reg(Register::R10, 999);
+
+        let result = handle_syscall(&mut state, &mut memory, &mut io);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::InvalidSyscall { syscall: 999 }
+        ));
+    }
+
+    #[test]
+    fn test_syscall_sha256() {
+        let mut state = VMState::new(0);
+        let mut memory = Memory::new();
+        let mut io = IOHandler::new(vec![]);
+
+        // Write "hello" to memory at 0x1000
+        let input_ptr = 0x1000;
+        memory.write_u8(input_ptr, b'h').unwrap();
+        memory.write_u8(input_ptr + 1, b'e').unwrap();
+        memory.write_u8(input_ptr + 2, b'l').unwrap();
+        memory.write_u8(input_ptr + 3, b'l').unwrap();
+        memory.write_u8(input_ptr + 4, b'o').unwrap();
+
+        // Set up SHA-256 syscall
+        let output_ptr = 0x2000;
+        state.write_reg(Register::R10, SYSCALL_SHA256);
+        state.write_reg(Register::R11, input_ptr);
+        state.write_reg(Register::R12, 5); // "hello" length
+        state.write_reg(Register::R13, output_ptr);
+
+        handle_syscall(&mut state, &mut memory, &mut io).unwrap();
+
+        // Check return value (should be 0 for success)
+        assert_eq!(state.read_reg(Register::R10), 0);
+
+        // Verify output bound was set (32 bits for SHA-256)
+        let bound = state.read_bound(Register::R14);
+        assert_eq!(bound.max_bits, 32);
+
+        // Verify hash output (SHA-256("hello"))
+        let expected = [
+            0x2cf24dba, 0x5fb0a30e, 0x26e83b2a, 0xc5b9e29e, 0x1b161e5c, 0x1fa7425e, 0x73043362,
+            0x938b9824,
+        ];
+        for (i, &exp) in expected.iter().enumerate() {
+            let word = memory.read_u32(output_ptr + (i * 4) as u64).unwrap();
+            assert_eq!(word, exp);
         }
     }
 }

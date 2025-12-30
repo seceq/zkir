@@ -8,6 +8,19 @@ members = [
     # "cli",
 ]
 
+# Root crate for end-to-end tests
+[package]
+name = "zkir-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+zkir-spec = { path = "zkir-spec" }
+zkir-runtime = { path = "zkir-runtime" }
+zkir-assembler = { path = "zkir-assembler" }
+zkir-disassembler = { path = "zkir-disassembler" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -43,9 +56,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Testing
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Cryptography
 sha2 = "0.10"
+
+# Statistics
+statistical = "1.0"
 
 # Field arithmetic (for later)
 # p3-field = { git = "https://github.com/Plonky3/Plonky3" }

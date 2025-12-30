@@ -1,248 +1,485 @@
-//! ZK IR v2.2 Instruction set (77 instructions)
+//! ZKIR v3.4 Instruction Set
+//!
+//! 31-bit instructions with 6-bit opcode and 4-bit register fields.
+//!
+//! ## Instruction Formats
+//! - R-type:  [opcode:6][rd:4][rs1:4][rs2:4][funct:13]
+//! - I-type:  [opcode:6][rd:4][rs1:4][imm19:19]
+//! - B-type:  [opcode:6][rs1:4][rs2:4][offset:17]
+//! - J-type:  [opcode:6][rd:4][offset:21]
+//! - R4-type: [opcode:6][rd:4][rs1:4][rs2:4][rs3:4][funct:9]
 
 use crate::register::Register;
 use serde::{Deserialize, Serialize};
 
-/// ZK IR Instruction
+/// ZKIR v3.4 Instruction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Instruction {
-    // ========== R-type ALU (opcode = 0000) ==========
-
-    // Arithmetic (ext=00, ext=10, ext=11)
+    // ========== Arithmetic ==========
+    /// ADD: rd = rs1 + rs2
     Add { rd: Register, rs1: Register, rs2: Register },
-    Sub { rd: Register, rs1: Register, rs2: Register },
-    Mul { rd: Register, rs1: Register, rs2: Register },
-    Mulh { rd: Register, rs1: Register, rs2: Register },
-    Mulhu { rd: Register, rs1: Register, rs2: Register },
-    Mulhsu { rd: Register, rs1: Register, rs2: Register },
 
-    // Division (ext=00)
-    Div { rd: Register, rs1: Register, rs2: Register },
+    /// SUB: rd = rs1 - rs2
+    Sub { rd: Register, rs1: Register, rs2: Register },
+
+    /// MUL: rd = (rs1 * rs2) & ((1 << 60) - 1) (lower 60 bits)
+    Mul { rd: Register, rs1: Register, rs2: Register },
+
+    /// MULH: rd = (rs1 * rs2) >> 60 (upper bits of 60×60 multiply)
+    Mulh { rd: Register, rs1: Register, rs2: Register },
+
+    /// DIVU: rd = rs1 / rs2 (unsigned)
     Divu { rd: Register, rs1: Register, rs2: Register },
-    Rem { rd: Register, rs1: Register, rs2: Register },
+
+    /// REMU: rd = rs1 % rs2 (unsigned)
     Remu { rd: Register, rs1: Register, rs2: Register },
 
-    // Logic (ext=00, ext=01)
+    /// DIV: rd = rs1 / rs2 (signed)
+    Div { rd: Register, rs1: Register, rs2: Register },
+
+    /// REM: rd = rs1 % rs2 (signed)
+    Rem { rd: Register, rs1: Register, rs2: Register },
+
+    /// ADDI: rd = rs1 + imm (sign-extended)
+    Addi { rd: Register, rs1: Register, imm: i32 },
+
+    // ========== Logical ==========
+    /// AND: rd = rs1 & rs2
     And { rd: Register, rs1: Register, rs2: Register },
-    Andn { rd: Register, rs1: Register, rs2: Register },
+
+    /// OR: rd = rs1 | rs2
     Or { rd: Register, rs1: Register, rs2: Register },
-    Orn { rd: Register, rs1: Register, rs2: Register },
+
+    /// XOR: rd = rs1 ^ rs2
     Xor { rd: Register, rs1: Register, rs2: Register },
-    Xnor { rd: Register, rs1: Register, rs2: Register },
 
-    // Shift (ext=00, ext=01, ext=10)
+    /// ANDI: rd = rs1 & imm
+    Andi { rd: Register, rs1: Register, imm: i32 },
+
+    /// ORI: rd = rs1 | imm
+    Ori { rd: Register, rs1: Register, imm: i32 },
+
+    /// XORI: rd = rs1 ^ imm
+    Xori { rd: Register, rs1: Register, imm: i32 },
+
+    // ========== Shift ==========
+    /// SLL: rd = rs1 << (rs2 & 0x3F) (logical left shift)
     Sll { rd: Register, rs1: Register, rs2: Register },
+
+    /// SRL: rd = rs1 >> (rs2 & 0x3F) (logical right shift)
     Srl { rd: Register, rs1: Register, rs2: Register },
+
+    /// SRA: rd = rs1 >> (rs2 & 0x3F) (arithmetic right shift)
     Sra { rd: Register, rs1: Register, rs2: Register },
-    Rol { rd: Register, rs1: Register, rs2: Register },
-    Ror { rd: Register, rs1: Register, rs2: Register },
 
-    // Compare (ext=00, ext=10)
-    Slt { rd: Register, rs1: Register, rs2: Register },
-    Sltu { rd: Register, rs1: Register, rs2: Register },
-    Min { rd: Register, rs1: Register, rs2: Register },
-    Max { rd: Register, rs1: Register, rs2: Register },
-    Minu { rd: Register, rs1: Register, rs2: Register },
-    Maxu { rd: Register, rs1: Register, rs2: Register },
-
-    // Bit Manipulation (ext=01, ext=10, ext=11)
-    Clz { rd: Register, rs1: Register, rs2: Register },
-    Ctz { rd: Register, rs1: Register, rs2: Register },
-    Cpop { rd: Register, rs1: Register, rs2: Register },
-    Rev8 { rd: Register, rs1: Register, rs2: Register },
-
-    // Conditional Move (ext2=000000, ext2=000001)
-    Cmovz { rd: Register, rs1: Register, rs2: Register },
-    Cmovnz { rd: Register, rs1: Register, rs2: Register },
-
-    // Field Operations (bits 29:24 = 111111)
-    Fadd { rd: Register, rs1: Register, rs2: Register },
-    Fsub { rd: Register, rs1: Register, rs2: Register },
-    Fmul { rd: Register, rs1: Register, rs2: Register },
-    Fneg { rd: Register, rs1: Register, rs2: Register },
-    Finv { rd: Register, rs1: Register, rs2: Register },
-
-    // ========== I-type Immediate (opcode = 0001) ==========
-    Addi { rd: Register, rs1: Register, imm: i16 },
-    Slti { rd: Register, rs1: Register, imm: i16 },
-    Sltiu { rd: Register, rs1: Register, imm: i16 },
-    Xori { rd: Register, rs1: Register, imm: i16 },
-    Ori { rd: Register, rs1: Register, imm: i16 },
-    Andi { rd: Register, rs1: Register, imm: i16 },
+    /// SLLI: rd = rs1 << shamt
     Slli { rd: Register, rs1: Register, shamt: u8 },
+
+    /// SRLI: rd = rs1 >> shamt (logical)
     Srli { rd: Register, rs1: Register, shamt: u8 },
+
+    /// SRAI: rd = rs1 >> shamt (arithmetic)
     Srai { rd: Register, rs1: Register, shamt: u8 },
 
-    // ========== Load (opcode = 0010) ==========
-    Lb { rd: Register, rs1: Register, imm: i16 },
-    Lh { rd: Register, rs1: Register, imm: i16 },
-    Lw { rd: Register, rs1: Register, imm: i16 },
-    Lbu { rd: Register, rs1: Register, imm: i16 },
-    Lhu { rd: Register, rs1: Register, imm: i16 },
+    // ========== Compare ==========
+    /// SLTU: rd = (rs1 < rs2) ? 1 : 0 (unsigned)
+    Sltu { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== Store (opcode = 0011) ==========
-    Sb { rs1: Register, rs2: Register, imm: i16 },
-    Sh { rs1: Register, rs2: Register, imm: i16 },
-    Sw { rs1: Register, rs2: Register, imm: i16 },
+    /// SGEU: rd = (rs1 >= rs2) ? 1 : 0 (unsigned)
+    Sgeu { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== Branch (opcodes 0100-1001) ==========
-    Beq { rs1: Register, rs2: Register, imm: i16 },
-    Bne { rs1: Register, rs2: Register, imm: i16 },
-    Blt { rs1: Register, rs2: Register, imm: i16 },
-    Bge { rs1: Register, rs2: Register, imm: i16 },
-    Bltu { rs1: Register, rs2: Register, imm: i16 },
-    Bgeu { rs1: Register, rs2: Register, imm: i16 },
+    /// SLT: rd = (rs1 < rs2) ? 1 : 0 (signed)
+    Slt { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== Upper Immediate (opcodes 1010-1011) ==========
-    Lui { rd: Register, imm: i32 },
-    Auipc { rd: Register, imm: i32 },
+    /// SGE: rd = (rs1 >= rs2) ? 1 : 0 (signed)
+    Sge { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== Jump (opcodes 1100-1101) ==========
-    Jal { rd: Register, imm: i32 },
-    Jalr { rd: Register, rs1: Register, imm: i16 },
+    /// SEQ: rd = (rs1 == rs2) ? 1 : 0
+    Seq { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== ZK Operations (opcode = 1110) ==========
-    Read { rd: Register },
-    Write { rs1: Register },
-    Hint { rd: Register },
-    Commit { rs1: Register },
-    AssertEq { rs1: Register, rs2: Register },
-    AssertNe { rs1: Register, rs2: Register },
-    AssertZero { rs1: Register },
-    RangeCheck { rs1: Register, bits: u8 },
-    Debug { rs1: Register },
-    Halt,
+    /// SNE: rd = (rs1 != rs2) ? 1 : 0
+    Sne { rd: Register, rs1: Register, rs2: Register },
 
-    // ========== System (opcode = 1111) ==========
+    // ========== Conditional Move ==========
+    /// CMOV: rd = (rs2 != 0) ? rs1 : rd
+    Cmov { rd: Register, rs1: Register, rs2: Register },
+
+    /// CMOVZ: rd = (rs2 == 0) ? rs1 : rd
+    Cmovz { rd: Register, rs1: Register, rs2: Register },
+
+    /// CMOVNZ: rd = (rs2 != 0) ? rs1 : rd
+    Cmovnz { rd: Register, rs1: Register, rs2: Register },
+
+    // ========== Memory - Load ==========
+    /// LB: rd = sign_extend(mem[rs1 + imm][7:0])
+    Lb { rd: Register, rs1: Register, imm: i32 },
+
+    /// LBU: rd = zero_extend(mem[rs1 + imm][7:0])
+    Lbu { rd: Register, rs1: Register, imm: i32 },
+
+    /// LH: rd = sign_extend(mem[rs1 + imm][15:0])
+    Lh { rd: Register, rs1: Register, imm: i32 },
+
+    /// LHU: rd = zero_extend(mem[rs1 + imm][15:0])
+    Lhu { rd: Register, rs1: Register, imm: i32 },
+
+    /// LW: rd = sign_extend(mem[rs1 + imm][31:0])
+    Lw { rd: Register, rs1: Register, imm: i32 },
+
+    /// LD: rd = mem[rs1 + imm][59:0] (60-bit load)
+    Ld { rd: Register, rs1: Register, imm: i32 },
+
+    // ========== Memory - Store ==========
+    /// SB: mem[rs1 + imm][7:0] = rs2[7:0]
+    Sb { rs1: Register, rs2: Register, imm: i32 },
+
+    /// SH: mem[rs1 + imm][15:0] = rs2[15:0]
+    Sh { rs1: Register, rs2: Register, imm: i32 },
+
+    /// SW: mem[rs1 + imm][31:0] = rs2[31:0]
+    Sw { rs1: Register, rs2: Register, imm: i32 },
+
+    /// SD: mem[rs1 + imm][59:0] = rs2[59:0] (60-bit store)
+    Sd { rs1: Register, rs2: Register, imm: i32 },
+
+    // ========== Branch ==========
+    /// BEQ: if (rs1 == rs2) PC += offset
+    Beq { rs1: Register, rs2: Register, offset: i32 },
+
+    /// BNE: if (rs1 != rs2) PC += offset
+    Bne { rs1: Register, rs2: Register, offset: i32 },
+
+    /// BLT: if (rs1 < rs2) PC += offset (signed)
+    Blt { rs1: Register, rs2: Register, offset: i32 },
+
+    /// BGE: if (rs1 >= rs2) PC += offset (signed)
+    Bge { rs1: Register, rs2: Register, offset: i32 },
+
+    /// BLTU: if (rs1 < rs2) PC += offset (unsigned)
+    Bltu { rs1: Register, rs2: Register, offset: i32 },
+
+    /// BGEU: if (rs1 >= rs2) PC += offset (unsigned)
+    Bgeu { rs1: Register, rs2: Register, offset: i32 },
+
+    // ========== Jump ==========
+    /// JAL: rd = PC + 4; PC += offset
+    Jal { rd: Register, offset: i32 },
+
+    /// JALR: rd = PC + 4; PC = (rs1 + imm) & ~1
+    Jalr { rd: Register, rs1: Register, imm: i32 },
+
+    // ========== System ==========
+    /// ECALL: System call (a0 = syscall number)
     Ecall,
+
+    /// EBREAK: Breakpoint / halt execution
     Ebreak,
 }
 
 impl Instruction {
-    /// Returns true if this instruction modifies the destination register
-    pub fn writes_register(&self) -> bool {
+    /// Get instruction mnemonic
+    pub fn mnemonic(&self) -> &'static str {
+        match self {
+            Instruction::Add { .. } => "add",
+            Instruction::Sub { .. } => "sub",
+            Instruction::Mul { .. } => "mul",
+            Instruction::Mulh { .. } => "mulh",
+            Instruction::Divu { .. } => "divu",
+            Instruction::Remu { .. } => "remu",
+            Instruction::Div { .. } => "div",
+            Instruction::Rem { .. } => "rem",
+            Instruction::Addi { .. } => "addi",
+            Instruction::And { .. } => "and",
+            Instruction::Or { .. } => "or",
+            Instruction::Xor { .. } => "xor",
+            Instruction::Andi { .. } => "andi",
+            Instruction::Ori { .. } => "ori",
+            Instruction::Xori { .. } => "xori",
+            Instruction::Sll { .. } => "sll",
+            Instruction::Srl { .. } => "srl",
+            Instruction::Sra { .. } => "sra",
+            Instruction::Slli { .. } => "slli",
+            Instruction::Srli { .. } => "srli",
+            Instruction::Srai { .. } => "srai",
+            Instruction::Sltu { .. } => "sltu",
+            Instruction::Sgeu { .. } => "sgeu",
+            Instruction::Slt { .. } => "slt",
+            Instruction::Sge { .. } => "sge",
+            Instruction::Seq { .. } => "seq",
+            Instruction::Sne { .. } => "sne",
+            Instruction::Cmov { .. } => "cmov",
+            Instruction::Cmovz { .. } => "cmovz",
+            Instruction::Cmovnz { .. } => "cmovnz",
+            Instruction::Lb { .. } => "lb",
+            Instruction::Lbu { .. } => "lbu",
+            Instruction::Lh { .. } => "lh",
+            Instruction::Lhu { .. } => "lhu",
+            Instruction::Lw { .. } => "lw",
+            Instruction::Ld { .. } => "ld",
+            Instruction::Sb { .. } => "sb",
+            Instruction::Sh { .. } => "sh",
+            Instruction::Sw { .. } => "sw",
+            Instruction::Sd { .. } => "sd",
+            Instruction::Beq { .. } => "beq",
+            Instruction::Bne { .. } => "bne",
+            Instruction::Blt { .. } => "blt",
+            Instruction::Bge { .. } => "bge",
+            Instruction::Bltu { .. } => "bltu",
+            Instruction::Bgeu { .. } => "bgeu",
+            Instruction::Jal { .. } => "jal",
+            Instruction::Jalr { .. } => "jalr",
+            Instruction::Ecall => "ecall",
+            Instruction::Ebreak => "ebreak",
+        }
+    }
+
+    /// Check if this is a branch instruction
+    pub fn is_branch(&self) -> bool {
         matches!(
             self,
-            Self::Add { .. }
-                | Self::Sub { .. }
-                | Self::Mul { .. }
-                | Self::Mulh { .. }
-                | Self::Mulhu { .. }
-                | Self::Mulhsu { .. }
-                | Self::Div { .. }
-                | Self::Divu { .. }
-                | Self::Rem { .. }
-                | Self::Remu { .. }
-                | Self::And { .. }
-                | Self::Andn { .. }
-                | Self::Or { .. }
-                | Self::Orn { .. }
-                | Self::Xor { .. }
-                | Self::Xnor { .. }
-                | Self::Sll { .. }
-                | Self::Srl { .. }
-                | Self::Sra { .. }
-                | Self::Rol { .. }
-                | Self::Ror { .. }
-                | Self::Slt { .. }
-                | Self::Sltu { .. }
-                | Self::Min { .. }
-                | Self::Max { .. }
-                | Self::Minu { .. }
-                | Self::Maxu { .. }
-                | Self::Clz { .. }
-                | Self::Ctz { .. }
-                | Self::Cpop { .. }
-                | Self::Rev8 { .. }
-                | Self::Cmovz { .. }
-                | Self::Cmovnz { .. }
-                | Self::Fadd { .. }
-                | Self::Fsub { .. }
-                | Self::Fmul { .. }
-                | Self::Fneg { .. }
-                | Self::Finv { .. }
-                | Self::Addi { .. }
-                | Self::Slti { .. }
-                | Self::Sltiu { .. }
-                | Self::Xori { .. }
-                | Self::Ori { .. }
-                | Self::Andi { .. }
-                | Self::Slli { .. }
-                | Self::Srli { .. }
-                | Self::Srai { .. }
-                | Self::Lb { .. }
-                | Self::Lh { .. }
-                | Self::Lw { .. }
-                | Self::Lbu { .. }
-                | Self::Lhu { .. }
-                | Self::Lui { .. }
-                | Self::Auipc { .. }
-                | Self::Jal { .. }
-                | Self::Jalr { .. }
-                | Self::Read { .. }
-                | Self::Hint { .. }
+            Instruction::Beq { .. }
+                | Instruction::Bne { .. }
+                | Instruction::Blt { .. }
+                | Instruction::Bge { .. }
+                | Instruction::Bltu { .. }
+                | Instruction::Bgeu { .. }
         )
     }
 
-    /// Returns true if this instruction is a control flow instruction
-    pub fn is_control_flow(&self) -> bool {
+    /// Check if this is a jump instruction
+    pub fn is_jump(&self) -> bool {
+        matches!(self, Instruction::Jal { .. } | Instruction::Jalr { .. })
+    }
+
+    /// Check if this is a load instruction
+    pub fn is_load(&self) -> bool {
         matches!(
             self,
-            Self::Beq { .. }
-                | Self::Bne { .. }
-                | Self::Blt { .. }
-                | Self::Bge { .. }
-                | Self::Bltu { .. }
-                | Self::Bgeu { .. }
-                | Self::Jal { .. }
-                | Self::Jalr { .. }
-                | Self::Ecall
-                | Self::Ebreak
-                | Self::Halt
+            Instruction::Lb { .. }
+                | Instruction::Lbu { .. }
+                | Instruction::Lh { .. }
+                | Instruction::Lhu { .. }
+                | Instruction::Lw { .. }
+                | Instruction::Ld { .. }
         )
     }
 
-    /// Returns true if this instruction accesses memory
-    pub fn accesses_memory(&self) -> bool {
+    /// Check if this is a store instruction
+    pub fn is_store(&self) -> bool {
         matches!(
             self,
-            Self::Lb { .. }
-                | Self::Lh { .. }
-                | Self::Lw { .. }
-                | Self::Lbu { .. }
-                | Self::Lhu { .. }
-                | Self::Sb { .. }
-                | Self::Sh { .. }
-                | Self::Sw { .. }
+            Instruction::Sb { .. }
+                | Instruction::Sh { .. }
+                | Instruction::Sw { .. }
+                | Instruction::Sd { .. }
         )
     }
 
-    /// Returns true if this is a ZK-specific instruction
-    pub fn is_zk_instruction(&self) -> bool {
-        matches!(
-            self,
-            Self::Read { .. }
-                | Self::Write { .. }
-                | Self::Hint { .. }
-                | Self::Commit { .. }
-                | Self::AssertEq { .. }
-                | Self::AssertNe { .. }
-                | Self::AssertZero { .. }
-                | Self::RangeCheck { .. }
-                | Self::Debug { .. }
-                | Self::Halt
-        )
+    /// Check if this is a system instruction
+    pub fn is_system(&self) -> bool {
+        matches!(self, Instruction::Ecall | Instruction::Ebreak)
     }
 
-    /// Returns true if this is a field arithmetic instruction
-    pub fn is_field_instruction(&self) -> bool {
-        matches!(
-            self,
-            Self::Fadd { .. }
-                | Self::Fsub { .. }
-                | Self::Fmul { .. }
-                | Self::Fneg { .. }
-                | Self::Finv { .. }
-        )
+    /// Get destination register if present
+    pub fn rd(&self) -> Option<Register> {
+        match self {
+            Instruction::Add { rd, .. }
+            | Instruction::Sub { rd, .. }
+            | Instruction::Mul { rd, .. }
+            | Instruction::Mulh { rd, .. }
+            | Instruction::Divu { rd, .. }
+            | Instruction::Remu { rd, .. }
+            | Instruction::Div { rd, .. }
+            | Instruction::Rem { rd, .. }
+            | Instruction::Addi { rd, .. }
+            | Instruction::And { rd, .. }
+            | Instruction::Or { rd, .. }
+            | Instruction::Xor { rd, .. }
+            | Instruction::Andi { rd, .. }
+            | Instruction::Ori { rd, .. }
+            | Instruction::Xori { rd, .. }
+            | Instruction::Sll { rd, .. }
+            | Instruction::Srl { rd, .. }
+            | Instruction::Sra { rd, .. }
+            | Instruction::Slli { rd, .. }
+            | Instruction::Srli { rd, .. }
+            | Instruction::Srai { rd, .. }
+            | Instruction::Sltu { rd, .. }
+            | Instruction::Sgeu { rd, .. }
+            | Instruction::Slt { rd, .. }
+            | Instruction::Sge { rd, .. }
+            | Instruction::Seq { rd, .. }
+            | Instruction::Sne { rd, .. }
+            | Instruction::Cmov { rd, .. }
+            | Instruction::Cmovz { rd, .. }
+            | Instruction::Cmovnz { rd, .. }
+            | Instruction::Lb { rd, .. }
+            | Instruction::Lbu { rd, .. }
+            | Instruction::Lh { rd, .. }
+            | Instruction::Lhu { rd, .. }
+            | Instruction::Lw { rd, .. }
+            | Instruction::Ld { rd, .. }
+            | Instruction::Jal { rd, .. }
+            | Instruction::Jalr { rd, .. } => Some(*rd),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // R-type
+            Instruction::Add { rd, rs1, rs2 }
+            | Instruction::Sub { rd, rs1, rs2 }
+            | Instruction::Mul { rd, rs1, rs2 }
+            | Instruction::Mulh { rd, rs1, rs2 }
+            | Instruction::Divu { rd, rs1, rs2 }
+            | Instruction::Remu { rd, rs1, rs2 }
+            | Instruction::Div { rd, rs1, rs2 }
+            | Instruction::Rem { rd, rs1, rs2 }
+            | Instruction::And { rd, rs1, rs2 }
+            | Instruction::Or { rd, rs1, rs2 }
+            | Instruction::Xor { rd, rs1, rs2 }
+            | Instruction::Sll { rd, rs1, rs2 }
+            | Instruction::Srl { rd, rs1, rs2 }
+            | Instruction::Sra { rd, rs1, rs2 }
+            | Instruction::Sltu { rd, rs1, rs2 }
+            | Instruction::Sgeu { rd, rs1, rs2 }
+            | Instruction::Slt { rd, rs1, rs2 }
+            | Instruction::Sge { rd, rs1, rs2 }
+            | Instruction::Seq { rd, rs1, rs2 }
+            | Instruction::Sne { rd, rs1, rs2 }
+            | Instruction::Cmov { rd, rs1, rs2 }
+            | Instruction::Cmovz { rd, rs1, rs2 }
+            | Instruction::Cmovnz { rd, rs1, rs2 } => {
+                write!(f, "{} {}, {}, {}", self.mnemonic(), rd, rs1, rs2)
+            }
+
+            // I-type (immediate)
+            Instruction::Addi { rd, rs1, imm }
+            | Instruction::Andi { rd, rs1, imm }
+            | Instruction::Ori { rd, rs1, imm }
+            | Instruction::Xori { rd, rs1, imm } => {
+                write!(f, "{} {}, {}, {}", self.mnemonic(), rd, rs1, imm)
+            }
+
+            // I-type (shift)
+            Instruction::Slli { rd, rs1, shamt }
+            | Instruction::Srli { rd, rs1, shamt }
+            | Instruction::Srai { rd, rs1, shamt } => {
+                write!(f, "{} {}, {}, {}", self.mnemonic(), rd, rs1, shamt)
+            }
+
+            // I-type (load)
+            Instruction::Lb { rd, rs1, imm }
+            | Instruction::Lbu { rd, rs1, imm }
+            | Instruction::Lh { rd, rs1, imm }
+            | Instruction::Lhu { rd, rs1, imm }
+            | Instruction::Lw { rd, rs1, imm }
+            | Instruction::Ld { rd, rs1, imm } => {
+                write!(f, "{} {}, {}({})", self.mnemonic(), rd, imm, rs1)
+            }
+
+            // S-type (store)
+            Instruction::Sb { rs1, rs2, imm }
+            | Instruction::Sh { rs1, rs2, imm }
+            | Instruction::Sw { rs1, rs2, imm }
+            | Instruction::Sd { rs1, rs2, imm } => {
+                write!(f, "{} {}, {}({})", self.mnemonic(), rs2, imm, rs1)
+            }
+
+            // B-type (branch)
+            Instruction::Beq { rs1, rs2, offset }
+            | Instruction::Bne { rs1, rs2, offset }
+            | Instruction::Blt { rs1, rs2, offset }
+            | Instruction::Bge { rs1, rs2, offset }
+            | Instruction::Bltu { rs1, rs2, offset }
+            | Instruction::Bgeu { rs1, rs2, offset } => {
+                write!(f, "{} {}, {}, {}", self.mnemonic(), rs1, rs2, offset)
+            }
+
+            // J-type
+            Instruction::Jal { rd, offset } => {
+                write!(f, "{} {}, {}", self.mnemonic(), rd, offset)
+            }
+
+            Instruction::Jalr { rd, rs1, imm } => {
+                write!(f, "{} {}, {}({})", self.mnemonic(), rd, imm, rs1)
+            }
+
+            // System
+            Instruction::Ecall => write!(f, "ecall"),
+            Instruction::Ebreak => write!(f, "ebreak"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mnemonic() {
+        let inst = Instruction::Add {
+            rd: Register::A0,
+            rs1: Register::A1,
+            rs2: Register::A2,
+        };
+        assert_eq!(inst.mnemonic(), "add");
+    }
+
+    #[test]
+    fn test_is_branch() {
+        let beq = Instruction::Beq {
+            rs1: Register::A0,
+            rs2: Register::A1,
+            offset: 4,
+        };
+        assert!(beq.is_branch());
+
+        let add = Instruction::Add {
+            rd: Register::A0,
+            rs1: Register::A1,
+            rs2: Register::A2,
+        };
+        assert!(!add.is_branch());
+    }
+
+    #[test]
+    fn test_rd() {
+        let add = Instruction::Add {
+            rd: Register::A0,
+            rs1: Register::A1,
+            rs2: Register::A2,
+        };
+        assert_eq!(add.rd(), Some(Register::A0));
+
+        let ecall = Instruction::Ecall;
+        assert_eq!(ecall.rd(), None);
+    }
+
+    #[test]
+    fn test_display() {
+        let add = Instruction::Add {
+            rd: Register::A0,
+            rs1: Register::A1,
+            rs2: Register::A2,
+        };
+        assert_eq!(format!("{}", add), "add a0, a1, a2");
+
+        let addi = Instruction::Addi {
+            rd: Register::A0,
+            rs1: Register::A1,
+            imm: 42,
+        };
+        assert_eq!(format!("{}", addi), "addi a0, a1, 42");
+
+        let lw = Instruction::Lw {
+            rd: Register::A0,
+            rs1: Register::SP,
+            imm: 8,
+        };
+        assert_eq!(format!("{}", lw), "lw a0, 8(sp)");
     }
 }

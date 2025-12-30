@@ -4,12 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Assembler for ZK IR v2.1"
+description = "Assembler for ZKIR v3.4 - Variable limb architecture"
 
 [dependencies]
 zkir-spec = { workspace = true }
 thiserror = { workspace = true }
 logos = { workspace = true }
-nom = { workspace = true }
 
 [dev-dependencies]

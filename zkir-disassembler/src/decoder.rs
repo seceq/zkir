@@ -1,301 +1,187 @@
-//! Instruction decoder for ZK IR v2.2 (30-bit encoding)
+//! Instruction decoder for ZKIR v3.4 (32-bit encoding)
+//!
+//! Decodes 32-bit words into Instruction structs.
+//! This is the inverse of the encoder in zkir-assembler.
+//!
+//! ## Instruction Formats (32 bits total, 7-bit opcode field):
+//! - R-type:  [opcode:7][rd:4][rs1:4][rs2:4][funct:13]  = 7+4+4+4+13 = 32 bits
+//! - I-type:  [opcode:7][rd:4][rs1:4][imm:17]           = 7+4+4+17 = 32 bits
+//! - S-type:  [opcode:7][rs1:4][rs2:4][imm:17]          = 7+4+4+17 = 32 bits
+//! - B-type:  [opcode:7][rs1:4][rs2:4][offset:17]       = 7+4+4+17 = 32 bits
+//! - J-type:  [opcode:7][rd:4][offset:21]               = 7+4+21 = 32 bits
+//!
+//! Note: Despite documentation claiming "6-bit opcodes", the actual opcode values
+//! range from 0x00-0x51 which requires 7 bits. We use 7 bits for the opcode field.
 
-use zkir_spec::{Instruction, Register};
+use zkir_spec::{Instruction, Opcode, Register};
 use crate::error::{DisassemblerError, Result};
 
-/// Decode 32-bit word containing 30-bit instruction
+/// Decode 32-bit instruction word
 pub fn decode(word: u32) -> Result<Instruction> {
-    // Validate bits 31:30 are zero
-    if word & 0xC0000000 != 0 {
-        return Err(DisassemblerError::InvalidEncoding(word));
-    }
+    // Extract 7-bit opcode (bits 6:0)
+    let opcode_byte = (word & 0x7F) as u8;
 
-    let opcode = (word & 0xF) as u8;
+    // Get opcode enum from byte
+    let opcode = Opcode::from_u8(opcode_byte)
+        .ok_or(DisassemblerError::UnknownOpcode(opcode_byte))?;
 
     match opcode {
-        0b0000 => decode_alu(word),        // R-type ALU
-        0b0001 => decode_alui(word),       // I-type immediate
-        0b0010 => decode_load(word),       // Load
-        0b0011 => decode_store(word),      // Store
-        0b0100 => decode_beq(word),        // BEQ
-        0b0101 => decode_bne(word),        // BNE
-        0b0110 => decode_blt(word),        // BLT
-        0b0111 => decode_bge(word),        // BGE
-        0b1000 => decode_bltu(word),       // BLTU
-        0b1001 => decode_bgeu(word),       // BGEU
-        0b1010 => decode_lui(word),        // LUI
-        0b1011 => decode_auipc(word),      // AUIPC
-        0b1100 => decode_jal(word),        // JAL
-        0b1101 => decode_jalr(word),       // JALR
-        0b1110 => decode_zkop(word),       // ZK operations
-        0b1111 => decode_system(word),     // System
-        _ => Err(DisassemblerError::UnknownOpcode(opcode)),
+        // ========== Arithmetic (R-type: 0x00-0x07) ==========
+        Opcode::Add => decode_r_type(word, |rd, rs1, rs2| Instruction::Add { rd, rs1, rs2 }),
+        Opcode::Sub => decode_r_type(word, |rd, rs1, rs2| Instruction::Sub { rd, rs1, rs2 }),
+        Opcode::Mul => decode_r_type(word, |rd, rs1, rs2| Instruction::Mul { rd, rs1, rs2 }),
+        Opcode::Mulh => decode_r_type(word, |rd, rs1, rs2| Instruction::Mulh { rd, rs1, rs2 }),
+        Opcode::Divu => decode_r_type(word, |rd, rs1, rs2| Instruction::Divu { rd, rs1, rs2 }),
+        Opcode::Remu => decode_r_type(word, |rd, rs1, rs2| Instruction::Remu { rd, rs1, rs2 }),
+        Opcode::Div => decode_r_type(word, |rd, rs1, rs2| Instruction::Div { rd, rs1, rs2 }),
+        Opcode::Rem => decode_r_type(word, |rd, rs1, rs2| Instruction::Rem { rd, rs1, rs2 }),
+
+        // ========== Immediate Arithmetic (I-type: 0x08) ==========
+        Opcode::Addi => decode_i_type(word, |rd, rs1, imm| Instruction::Addi { rd, rs1, imm }),
+
+        // ========== Logical (R-type: 0x10-0x12) ==========
+        Opcode::And => decode_r_type(word, |rd, rs1, rs2| Instruction::And { rd, rs1, rs2 }),
+        Opcode::Or => decode_r_type(word, |rd, rs1, rs2| Instruction::Or { rd, rs1, rs2 }),
+        Opcode::Xor => decode_r_type(word, |rd, rs1, rs2| Instruction::Xor { rd, rs1, rs2 }),
+
+        // ========== Immediate Logical (I-type: 0x13-0x15) ==========
+        Opcode::Andi => decode_i_type(word, |rd, rs1, imm| Instruction::Andi { rd, rs1, imm }),
+        Opcode::Ori => decode_i_type(word, |rd, rs1, imm| Instruction::Ori { rd, rs1, imm }),
+        Opcode::Xori => decode_i_type(word, |rd, rs1, imm| Instruction::Xori { rd, rs1, imm }),
+
+        // ========== Shift (R-type: 0x18-0x1A) ==========
+        Opcode::Sll => decode_r_type(word, |rd, rs1, rs2| Instruction::Sll { rd, rs1, rs2 }),
+        Opcode::Srl => decode_r_type(word, |rd, rs1, rs2| Instruction::Srl { rd, rs1, rs2 }),
+        Opcode::Sra => decode_r_type(word, |rd, rs1, rs2| Instruction::Sra { rd, rs1, rs2 }),
+
+        // ========== Shift Immediate (I-type: 0x1B-0x1D) ==========
+        Opcode::Slli => decode_shift(word, |rd, rs1, shamt| Instruction::Slli { rd, rs1, shamt }),
+        Opcode::Srli => decode_shift(word, |rd, rs1, shamt| Instruction::Srli { rd, rs1, shamt }),
+        Opcode::Srai => decode_shift(word, |rd, rs1, shamt| Instruction::Srai { rd, rs1, shamt }),
+
+        // ========== Compare (R-type: 0x20-0x25) ==========
+        Opcode::Sltu => decode_r_type(word, |rd, rs1, rs2| Instruction::Sltu { rd, rs1, rs2 }),
+        Opcode::Sgeu => decode_r_type(word, |rd, rs1, rs2| Instruction::Sgeu { rd, rs1, rs2 }),
+        Opcode::Slt => decode_r_type(word, |rd, rs1, rs2| Instruction::Slt { rd, rs1, rs2 }),
+        Opcode::Sge => decode_r_type(word, |rd, rs1, rs2| Instruction::Sge { rd, rs1, rs2 }),
+        Opcode::Seq => decode_r_type(word, |rd, rs1, rs2| Instruction::Seq { rd, rs1, rs2 }),
+        Opcode::Sne => decode_r_type(word, |rd, rs1, rs2| Instruction::Sne { rd, rs1, rs2 }),
+
+        // ========== Conditional Move (R-type: 0x26-0x28) ==========
+        Opcode::Cmov => decode_r_type(word, |rd, rs1, rs2| Instruction::Cmov { rd, rs1, rs2 }),
+        Opcode::Cmovz => decode_r_type(word, |rd, rs1, rs2| Instruction::Cmovz { rd, rs1, rs2 }),
+        Opcode::Cmovnz => decode_r_type(word, |rd, rs1, rs2| Instruction::Cmovnz { rd, rs1, rs2 }),
+
+        // ========== Load (I-type: 0x30-0x35) ==========
+        Opcode::Lb => decode_i_type(word, |rd, rs1, imm| Instruction::Lb { rd, rs1, imm }),
+        Opcode::Lbu => decode_i_type(word, |rd, rs1, imm| Instruction::Lbu { rd, rs1, imm }),
+        Opcode::Lh => decode_i_type(word, |rd, rs1, imm| Instruction::Lh { rd, rs1, imm }),
+        Opcode::Lhu => decode_i_type(word, |rd, rs1, imm| Instruction::Lhu { rd, rs1, imm }),
+        Opcode::Lw => decode_i_type(word, |rd, rs1, imm| Instruction::Lw { rd, rs1, imm }),
+        Opcode::Ld => decode_i_type(word, |rd, rs1, imm| Instruction::Ld { rd, rs1, imm }),
+
+        // ========== Store (S-type: 0x38-0x3B) ==========
+        Opcode::Sb => decode_store(word, |rs1, rs2, imm| Instruction::Sb { rs1, rs2, imm }),
+        Opcode::Sh => decode_store(word, |rs1, rs2, imm| Instruction::Sh { rs1, rs2, imm }),
+        Opcode::Sw => decode_store(word, |rs1, rs2, imm| Instruction::Sw { rs1, rs2, imm }),
+        Opcode::Sd => decode_store(word, |rs1, rs2, imm| Instruction::Sd { rs1, rs2, imm }),
+
+        // ========== Branch (B-type: 0x40-0x45) ==========
+        Opcode::Beq => decode_b_type(word, |rs1, rs2, offset| Instruction::Beq { rs1, rs2, offset }),
+        Opcode::Bne => decode_b_type(word, |rs1, rs2, offset| Instruction::Bne { rs1, rs2, offset }),
+        Opcode::Blt => decode_b_type(word, |rs1, rs2, offset| Instruction::Blt { rs1, rs2, offset }),
+        Opcode::Bge => decode_b_type(word, |rs1, rs2, offset| Instruction::Bge { rs1, rs2, offset }),
+        Opcode::Bltu => decode_b_type(word, |rs1, rs2, offset| Instruction::Bltu { rs1, rs2, offset }),
+        Opcode::Bgeu => decode_b_type(word, |rs1, rs2, offset| Instruction::Bgeu { rs1, rs2, offset }),
+
+        // ========== Jump (J-type: 0x48, I-type: 0x49) ==========
+        Opcode::Jal => decode_j_type(word, |rd, offset| Instruction::Jal { rd, offset }),
+        Opcode::Jalr => decode_i_type(word, |rd, rs1, imm| Instruction::Jalr { rd, rs1, imm }),
+
+        // ========== System (0x50-0x51) ==========
+        Opcode::Ecall => Ok(Instruction::Ecall),
+        Opcode::Ebreak => Ok(Instruction::Ebreak),
     }
 }
 
-/// Decode R-type ALU (opcode = 0000)
-fn decode_alu(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let rs1 = decode_register((word >> 9) & 0x1F)?;
-    let rs2 = decode_register((word >> 14) & 0x1F)?;
-    let funct = (word >> 19) & 0x7;
-    let ext = (word >> 22) & 0x3;
-    let ext2 = (word >> 24) & 0x3F;
-
-    // Check for field operations (bits 29:24 = 111111)
-    if ext2 == 0b111111 {
-        return match funct {
-            0b000 => Ok(Instruction::Fadd { rd, rs1, rs2 }),
-            0b001 => Ok(Instruction::Fsub { rd, rs1, rs2 }),
-            0b010 => Ok(Instruction::Fmul { rd, rs1, rs2 }),
-            0b011 => Ok(Instruction::Fneg { rd, rs1, rs2 }),
-            0b100 => Ok(Instruction::Finv { rd, rs1, rs2 }),
-            _ => Err(DisassemblerError::InvalidEncoding(word)),
-        };
-    }
-
-    // Check for ext2 instructions (ext=11, funct=111)
-    if ext == 0b11 && funct == 0b111 {
-        return match ext2 {
-            0b000000 => Ok(Instruction::Cmovz { rd, rs1, rs2 }),
-            0b000001 => Ok(Instruction::Cmovnz { rd, rs1, rs2 }),
-            _ => Err(DisassemblerError::InvalidEncoding(word)),
-        };
-    }
-
-    // Standard R-type decoding
-    match (funct, ext) {
-        // Arithmetic
-        (0b000, 0b00) => Ok(Instruction::Add { rd, rs1, rs2 }),
-        (0b000, 0b01) => Ok(Instruction::Sub { rd, rs1, rs2 }),
-        (0b000, 0b10) => Ok(Instruction::Mul { rd, rs1, rs2 }),
-        (0b000, 0b11) => Ok(Instruction::Mulh { rd, rs1, rs2 }),
-
-        // Logic
-        (0b001, 0b00) => Ok(Instruction::And { rd, rs1, rs2 }),
-        (0b001, 0b01) => Ok(Instruction::Andn { rd, rs1, rs2 }),
-        (0b001, 0b10) => Ok(Instruction::Or { rd, rs1, rs2 }),
-        (0b001, 0b11) => Ok(Instruction::Orn { rd, rs1, rs2 }),
-
-        // Shift
-        (0b010, 0b00) => Ok(Instruction::Xor { rd, rs1, rs2 }),
-        (0b010, 0b01) => Ok(Instruction::Xnor { rd, rs1, rs2 }),
-        (0b010, 0b10) => Ok(Instruction::Sll { rd, rs1, rs2 }),
-        (0b010, 0b11) => Ok(Instruction::Rol { rd, rs1, rs2 }),
-
-        (0b011, 0b00) => Ok(Instruction::Srl { rd, rs1, rs2 }),
-        (0b011, 0b01) => Ok(Instruction::Sra { rd, rs1, rs2 }),
-        (0b011, 0b10) => Ok(Instruction::Ror { rd, rs1, rs2 }),
-        (0b011, 0b11) => Ok(Instruction::Clz { rd, rs1, rs2 }),
-
-        // Compare
-        (0b100, 0b00) => Ok(Instruction::Slt { rd, rs1, rs2 }),
-        (0b100, 0b01) => Ok(Instruction::Sltu { rd, rs1, rs2 }),
-        (0b100, 0b10) => Ok(Instruction::Min { rd, rs1, rs2 }),
-        (0b100, 0b11) => Ok(Instruction::Max { rd, rs1, rs2 }),
-
-        (0b101, 0b00) => Ok(Instruction::Minu { rd, rs1, rs2 }),
-        (0b101, 0b01) => Ok(Instruction::Maxu { rd, rs1, rs2 }),
-        (0b101, 0b10) => Ok(Instruction::Mulhu { rd, rs1, rs2 }),
-        (0b101, 0b11) => Ok(Instruction::Mulhsu { rd, rs1, rs2 }),
-
-        // Division
-        (0b110, 0b00) => Ok(Instruction::Div { rd, rs1, rs2 }),
-        (0b110, 0b01) => Ok(Instruction::Divu { rd, rs1, rs2 }),
-        (0b110, 0b10) => Ok(Instruction::Rem { rd, rs1, rs2 }),
-        (0b110, 0b11) => Ok(Instruction::Remu { rd, rs1, rs2 }),
-
-        // Bit manipulation
-        (0b111, 0b00) => Ok(Instruction::Rev8 { rd, rs1, rs2 }),
-        (0b111, 0b01) => Ok(Instruction::Cpop { rd, rs1, rs2 }),
-        (0b111, 0b10) => Ok(Instruction::Ctz { rd, rs1, rs2 }),
-
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
+/// Decode R-type instruction
+/// Format: [opcode:7][rd:4][rs1:4][rs2:4][funct:13]
+fn decode_r_type<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, Register) -> Instruction,
+{
+    let rd = decode_register((word >> 7) & 0xF)?;
+    let rs1 = decode_register((word >> 11) & 0xF)?;
+    let rs2 = decode_register((word >> 15) & 0xF)?;
+    Ok(constructor(rd, rs1, rs2))
 }
 
-/// Decode I-type immediate (opcode = 0001)
-fn decode_alui(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let rs1 = decode_register((word >> 9) & 0x1F)?;
-    let imm_raw = (word >> 14) & 0x1FFF;
-    let funct = (word >> 27) & 0x7;
-
-    // Sign-extend 13-bit immediate
-    let imm = sign_extend(imm_raw, 13) as i16;
-
-    match funct {
-        0b000 => Ok(Instruction::Addi { rd, rs1, imm }),
-        0b001 => Ok(Instruction::Slli { rd, rs1, shamt: (imm_raw & 0x1F) as u8 }),
-        0b010 => Ok(Instruction::Slti { rd, rs1, imm }),
-        0b011 => Ok(Instruction::Sltiu { rd, rs1, imm }),
-        0b100 => Ok(Instruction::Xori { rd, rs1, imm }),
-        0b101 => {
-            // SRLI or SRAI based on bit 12
-            if (imm_raw >> 12) & 1 == 1 {
-                Ok(Instruction::Srai { rd, rs1, shamt: (imm_raw & 0x1F) as u8 })
-            } else {
-                Ok(Instruction::Srli { rd, rs1, shamt: (imm_raw & 0x1F) as u8 })
-            }
-        }
-        0b110 => Ok(Instruction::Ori { rd, rs1, imm }),
-        0b111 => Ok(Instruction::Andi { rd, rs1, imm }),
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
+/// Decode I-type instruction
+/// Format: [opcode:7][rd:4][rs1:4][imm:17]
+fn decode_i_type<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i32) -> Instruction,
+{
+    let rd = decode_register((word >> 7) & 0xF)?;
+    let rs1 = decode_register((word >> 11) & 0xF)?;
+    let imm_raw = (word >> 15) & 0x1FFFF;
+    let imm = sign_extend(imm_raw, 17);
+    Ok(constructor(rd, rs1, imm))
 }
 
-/// Decode Load (opcode = 0010)
-fn decode_load(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let rs1 = decode_register((word >> 9) & 0x1F)?;
-    let imm_raw = (word >> 14) & 0x1FFF;
-    let funct = (word >> 27) & 0x7;
-
-    let imm = sign_extend(imm_raw, 13) as i16;
-
-    match funct {
-        0b000 => Ok(Instruction::Lb { rd, rs1, imm }),
-        0b001 => Ok(Instruction::Lh { rd, rs1, imm }),
-        0b010 => Ok(Instruction::Lw { rd, rs1, imm }),
-        0b100 => Ok(Instruction::Lbu { rd, rs1, imm }),
-        0b101 => Ok(Instruction::Lhu { rd, rs1, imm }),
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
+/// Decode shift instruction (I-type with shamt instead of full immediate)
+/// Format: [opcode:7][rd:4][rs1:4][shamt:17] (shamt uses only lower bits)
+fn decode_shift<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, u8) -> Instruction,
+{
+    let rd = decode_register((word >> 7) & 0xF)?;
+    let rs1 = decode_register((word >> 11) & 0xF)?;
+    let shamt = ((word >> 15) & 0xFF) as u8;
+    Ok(constructor(rd, rs1, shamt))
 }
 
-/// Decode Store (opcode = 0011)
-fn decode_store(word: u32) -> Result<Instruction> {
-    let funct = (word >> 4) & 0x7;
-    let rs1 = decode_register((word >> 7) & 0x1F)?;
-    let rs2 = decode_register((word >> 12) & 0x1F)?;
-    let imm_raw = (word >> 17) & 0x1FFF;
-
-    let imm = sign_extend(imm_raw, 13) as i16;
-
-    match funct {
-        0b000 => Ok(Instruction::Sb { rs1, rs2, imm }),
-        0b001 => Ok(Instruction::Sh { rs1, rs2, imm }),
-        0b010 => Ok(Instruction::Sw { rs1, rs2, imm }),
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
+/// Decode store instruction (S-type: base address in first register field)
+/// Format: [opcode:7][rs1:4][rs2:4][imm:17]
+fn decode_store<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i32) -> Instruction,
+{
+    let rs1 = decode_register((word >> 7) & 0xF)?;  // base address
+    let rs2 = decode_register((word >> 11) & 0xF)?; // value to store
+    let imm_raw = (word >> 15) & 0x1FFFF;
+    let imm = sign_extend(imm_raw, 17);
+    Ok(constructor(rs1, rs2, imm))
 }
 
-/// Decode branch instructions
-fn decode_branch(word: u32) -> Result<(Register, Register, i16)> {
-    let rs2 = decode_register((word >> 4) & 0x1F)?;
-    let rs1 = decode_register((word >> 9) & 0x1F)?;
-    let imm_raw = (word >> 14) & 0xFFFF;
-    let imm = sign_extend(imm_raw, 16) as i16;
-    Ok((rs1, rs2, imm))
+/// Decode B-type instruction
+/// Format: [opcode:7][rs1:4][rs2:4][offset:17]
+fn decode_b_type<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, Register, i32) -> Instruction,
+{
+    let rs1 = decode_register((word >> 7) & 0xF)?;
+    let rs2 = decode_register((word >> 11) & 0xF)?;
+    let offset_raw = (word >> 15) & 0x1FFFF;
+    let offset = sign_extend(offset_raw, 17);
+    Ok(constructor(rs1, rs2, offset))
 }
 
-fn decode_beq(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Beq { rs1, rs2, imm })
+/// Decode J-type instruction
+/// Format: [opcode:7][rd:4][offset:21]
+fn decode_j_type<F>(word: u32, constructor: F) -> Result<Instruction>
+where
+    F: FnOnce(Register, i32) -> Instruction,
+{
+    let rd = decode_register((word >> 7) & 0xF)?;
+    let offset_raw = (word >> 11) & 0x1FFFFF;
+    let offset = sign_extend(offset_raw, 21);
+    Ok(constructor(rd, offset))
 }
 
-fn decode_bne(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Bne { rs1, rs2, imm })
-}
-
-fn decode_blt(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Blt { rs1, rs2, imm })
-}
-
-fn decode_bge(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Bge { rs1, rs2, imm })
-}
-
-fn decode_bltu(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Bltu { rs1, rs2, imm })
-}
-
-fn decode_bgeu(word: u32) -> Result<Instruction> {
-    let (rs1, rs2, imm) = decode_branch(word)?;
-    Ok(Instruction::Bgeu { rs1, rs2, imm })
-}
-
-/// Decode LUI (opcode = 1010)
-fn decode_lui(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let imm_raw = (word >> 9) & 0x1FFFFF;
-    let imm = sign_extend(imm_raw, 21) as i32;
-    Ok(Instruction::Lui { rd, imm })
-}
-
-/// Decode AUIPC (opcode = 1011)
-fn decode_auipc(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let imm_raw = (word >> 9) & 0x1FFFFF;
-    let imm = sign_extend(imm_raw, 21) as i32;
-    Ok(Instruction::Auipc { rd, imm })
-}
-
-/// Decode JAL (opcode = 1100)
-fn decode_jal(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let imm_raw = (word >> 9) & 0x1FFFFF;
-    let imm = sign_extend(imm_raw, 21) as i32;
-    Ok(Instruction::Jal { rd, imm })
-}
-
-/// Decode JALR (opcode = 1101)
-fn decode_jalr(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 4) & 0x1F)?;
-    let rs1 = decode_register((word >> 9) & 0x1F)?;
-    let imm_raw = (word >> 14) & 0x1FFF;
-    let imm = sign_extend(imm_raw, 13) as i16;
-    Ok(Instruction::Jalr { rd, rs1, imm })
-}
-
-/// Decode ZK operations (opcode = 1110)
-fn decode_zkop(word: u32) -> Result<Instruction> {
-    let rd = decode_register((word >> 7) & 0x1F)?;
-    let rs1 = decode_register((word >> 12) & 0x1F)?;
-    let imm = ((word >> 17) & 0xFF) as u8;
-    let func = (word >> 25) & 0x1F;
-
-    match func {
-        0b00000 => Ok(Instruction::Read { rd }),
-        0b00001 => Ok(Instruction::Write { rs1 }),
-        0b00010 => Ok(Instruction::Hint { rd }),
-        0b00011 => Ok(Instruction::Commit { rs1 }),
-        0b00100 => {
-            // ASSERT_EQ uses rs2 in rd position
-            let rs2 = rd;
-            Ok(Instruction::AssertEq { rs1, rs2 })
-        }
-        0b00101 => {
-            // ASSERT_NE uses rs2 in rd position
-            let rs2 = rd;
-            Ok(Instruction::AssertNe { rs1, rs2 })
-        }
-        0b00110 => Ok(Instruction::AssertZero { rs1 }),
-        0b00111 => Ok(Instruction::RangeCheck { rs1, bits: imm }),
-        0b01000 => Ok(Instruction::Debug { rs1 }),
-        0b11111 => Ok(Instruction::Halt),
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
-}
-
-/// Decode System (opcode = 1111)
-fn decode_system(word: u32) -> Result<Instruction> {
-    let imm = (word >> 14) & 0x1FFF;
-
-    match imm {
-        0 => Ok(Instruction::Ecall),
-        1 => Ok(Instruction::Ebreak),
-        _ => Err(DisassemblerError::InvalidEncoding(word)),
-    }
-}
-
-/// Decode register from 5-bit index
+/// Decode register from 4-bit index
 fn decode_register(index: u32) -> Result<Register> {
-    Register::from_index(index as usize)
+    Register::from_index(index as u8)
         .ok_or(DisassemblerError::InvalidEncoding(index))
 }
 
@@ -311,120 +197,224 @@ mod tests {
 
     #[test]
     fn test_decode_add() {
-        // ADD r5, r6, r7
-        // opcode=0000, rd=5, rs1=6, rs2=7, funct=000, ext=00
-        let word = 0b0000_00_000_00111_00110_00101_0000;
+        // ADD r1, r2, r3 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Add.to_u8() as u32;  // opcode (7 bits)
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 3 << 15;             // rs2
 
         let instr = decode(word).unwrap();
         assert_eq!(
             instr,
             Instruction::Add {
-                rd: Register::R5,
-                rs1: Register::R6,
-                rs2: Register::R7
+                rd: Register::R1,
+                rs1: Register::R2,
+                rs2: Register::R3
             }
         );
     }
 
     #[test]
     fn test_decode_addi() {
-        // ADDI r5, r6, 100
-        // opcode=0001, rd=5, rs1=6, imm=100, funct=000
-        let word = 0b000_0000001100100_00110_00101_0001;
+        // ADDI r1, r2, 100 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Addi.to_u8() as u32;  // opcode (7 bits)
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 100 << 15;           // imm (17 bits)
 
         let instr = decode(word).unwrap();
         assert_eq!(
             instr,
             Instruction::Addi {
-                rd: Register::R5,
-                rs1: Register::R6,
+                rd: Register::R1,
+                rs1: Register::R2,
                 imm: 100
             }
         );
     }
 
     #[test]
-    fn test_decode_fadd() {
-        // FADD r5, r6, r7
-        // opcode=0000, rd=5, rs1=6, rs2=7, funct=000, ext=00, marker=111111
-        let word = 0b111111_00_000_00111_00110_00101_0000;
+    fn test_decode_and() {
+        // AND r1, r2, r3 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::And.to_u8() as u32;  // opcode (7 bits) = 0x10
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 3 << 15;             // rs2
 
         let instr = decode(word).unwrap();
         assert_eq!(
             instr,
-            Instruction::Fadd {
-                rd: Register::R5,
-                rs1: Register::R6,
-                rs2: Register::R7
+            Instruction::And {
+                rd: Register::R1,
+                rs1: Register::R2,
+                rs2: Register::R3
             }
         );
     }
 
     #[test]
-    fn test_decode_ecall() {
-        // ECALL: opcode=1111, imm=0
-        let word = 0b000_0000000000000_00000_00000_1111;
-
-        let instr = decode(word).unwrap();
-        assert_eq!(instr, Instruction::Ecall);
-    }
-
-    #[test]
-    fn test_decode_halt() {
-        // HALT: opcode=1110, func=11111, rd=0, rs1=0, imm=0
-        // Z-type format: | func(5) | imm(8) | rs1(5) | rd(5) | opcode(4) |
-        let word = 0x3E00000E; // 0b111110000000000000000000001110
-
-        let instr = decode(word).unwrap();
-        assert_eq!(instr, Instruction::Halt);
-    }
-
-    #[test]
-    fn test_invalid_bits_31_30() {
-        // Word with bits 31:30 set should fail
-        let word = 0x80000000;
-        assert!(decode(word).is_err());
-    }
-
-    #[test]
-    fn test_sign_extend() {
-        assert_eq!(sign_extend(0b1111111111111, 13), -1);
-        assert_eq!(sign_extend(0b0000000000001, 13), 1);
-        assert_eq!(sign_extend(0b1000000000000, 13), -4096);
-        assert_eq!(sign_extend(0b0111111111111, 13), 4095);
-    }
-
-    #[test]
     fn test_decode_lw() {
-        // LW r5, 100(r6)
-        // opcode=0010, rd=5, rs1=6, imm=100, funct=010
-        let word = 0b010_0000001100100_00110_00101_0010;
+        // LW r1, 16(r2) (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Lw.to_u8() as u32;  // opcode (7 bits) = 0x34
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 16 << 15;            // imm (17 bits)
 
         let instr = decode(word).unwrap();
         assert_eq!(
             instr,
             Instruction::Lw {
-                rd: Register::R5,
-                rs1: Register::R6,
-                imm: 100
+                rd: Register::R1,
+                rs1: Register::R2,
+                imm: 16
+            }
+        );
+    }
+
+    #[test]
+    fn test_decode_sw() {
+        // SW rs2, imm(rs1) (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Sw.to_u8() as u32;  // opcode (7 bits) = 0x3A
+        word |= 2 << 7;              // rs1 (base address)
+        word |= 1 << 11;             // rs2 (value to store)
+        word |= 16 << 15;            // imm (offset, 17 bits)
+
+        let instr = decode(word).unwrap();
+        assert_eq!(
+            instr,
+            Instruction::Sw {
+                rs1: Register::R2,
+                rs2: Register::R1,
+                imm: 16
             }
         );
     }
 
     #[test]
     fn test_decode_beq() {
-        // BEQ r5, r6, 10
-        // opcode=0100, rs1=5, rs2=6, imm=10
-        let word = 0b0000000000001010_00101_00110_0100;
+        // BEQ r1, r2, 8 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Beq.to_u8() as u32;  // opcode (7 bits) = 0x40
+        word |= 1 << 7;              // rs1
+        word |= 2 << 11;             // rs2
+        word |= 8 << 15;             // offset (17 bits)
 
         let instr = decode(word).unwrap();
         assert_eq!(
             instr,
             Instruction::Beq {
-                rs1: Register::R5,
-                rs2: Register::R6,
-                imm: 10
+                rs1: Register::R1,
+                rs2: Register::R2,
+                offset: 8
             }
         );
+    }
+
+    #[test]
+    fn test_decode_jal() {
+        // JAL r1, 100 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Jal.to_u8() as u32;  // opcode (7 bits) = 0x48
+        word |= 1 << 7;              // rd
+        word |= 100 << 11;           // offset (21 bits)
+
+        let instr = decode(word).unwrap();
+        assert_eq!(
+            instr,
+            Instruction::Jal {
+                rd: Register::R1,
+                offset: 100
+            }
+        );
+    }
+
+    #[test]
+    fn test_decode_ecall() {
+        let word = Opcode::Ecall.to_u8() as u32;  // 7-bit opcode = 0x50
+
+        let instr = decode(word).unwrap();
+        assert_eq!(instr, Instruction::Ecall);
+    }
+
+    #[test]
+    fn test_decode_ebreak() {
+        let word = Opcode::Ebreak.to_u8() as u32;  // 7-bit opcode = 0x51
+
+        let instr = decode(word).unwrap();
+        assert_eq!(instr, Instruction::Ebreak);
+    }
+
+    #[test]
+    fn test_sign_extend() {
+        // Test 17-bit sign extension
+        assert_eq!(sign_extend(0x1FFFF, 17), -1);
+        assert_eq!(sign_extend(0x00001, 17), 1);
+        assert_eq!(sign_extend(0x10000, 17), -65536);
+        assert_eq!(sign_extend(0x0FFFF, 17), 65535);
+
+        // Test 21-bit sign extension (offset size for JAL)
+        assert_eq!(sign_extend(0x1FFFFF, 21), -1);
+        assert_eq!(sign_extend(0x100000, 21), -1048576);
+    }
+
+    #[test]
+    fn test_decode_negative_immediate() {
+        // ADDI r1, r2, -1 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Addi.to_u8() as u32;  // opcode (7 bits)
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 0x1FFFF << 15;       // imm = -1 in 17-bit two's complement
+
+        let instr = decode(word).unwrap();
+        assert_eq!(
+            instr,
+            Instruction::Addi {
+                rd: Register::R1,
+                rs1: Register::R2,
+                imm: -1
+            }
+        );
+    }
+
+    #[test]
+    fn test_decode_slli() {
+        // SLLI r1, r2, 5 (7-bit opcode format)
+        let mut word = 0u32;
+        word |= Opcode::Slli.to_u8() as u32;  // opcode (7 bits) = 0x1B
+        word |= 1 << 7;              // rd
+        word |= 2 << 11;             // rs1
+        word |= 5 << 15;             // shamt (in 17-bit immediate field)
+
+        let instr = decode(word).unwrap();
+        assert_eq!(
+            instr,
+            Instruction::Slli {
+                rd: Register::R1,
+                rs1: Register::R2,
+                shamt: 5
+            }
+        );
+    }
+
+    #[test]
+    fn test_opcode_values() {
+        // Verify opcodes match ZKIR v3.4 spec
+        assert_eq!(Opcode::Add.to_u8(), 0x00);
+        assert_eq!(Opcode::Addi.to_u8(), 0x08);
+        assert_eq!(Opcode::And.to_u8(), 0x10);
+        assert_eq!(Opcode::Sll.to_u8(), 0x18);
+        assert_eq!(Opcode::Sltu.to_u8(), 0x20);
+        assert_eq!(Opcode::Cmov.to_u8(), 0x26);
+        assert_eq!(Opcode::Lb.to_u8(), 0x30);
+        assert_eq!(Opcode::Sb.to_u8(), 0x38);
+        assert_eq!(Opcode::Beq.to_u8(), 0x40);
+        assert_eq!(Opcode::Jal.to_u8(), 0x48);
+        assert_eq!(Opcode::Ecall.to_u8(), 0x50);
     }
 }

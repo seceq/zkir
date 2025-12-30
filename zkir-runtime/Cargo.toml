@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "ZK IR virtual machine (32-bit)"
+description = "ZKIR v3.4 - Variable limb architecture virtual machine"
 
 [dependencies]
 zkir-spec = { workspace = true }
@@ -13,6 +13,9 @@ serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+sha2 = "0.10"
+sha3 = "0.10"
+blake3 = "1.5"
 
 [dev-dependencies]
 zkir-assembler = { workspace = true }
