@@ -5,6 +5,17 @@
 use crate::bound::{ValueBound, CryptoType};
 use std::cmp::Ordering;
 
+/// Register storage state for deferred carry model
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RegisterState {
+    /// Register contains a normalized value (20-bit limbs packed with normalized_bits)
+    #[default]
+    Normalized,
+    /// Register contains an accumulated value (30-bit limbs packed with limb_bits)
+    Accumulated,
+}
+
 /// A single execution trace row
 ///
 /// Records the complete VM state at a single cycle for proof generation.
@@ -25,6 +36,10 @@ pub struct TraceRow {
 
     /// Bounds for each register value
     pub bounds: [ValueBound; 16],
+
+    /// Register storage states (Normalized vs Accumulated)
+    /// Used by the converter to determine correct unpacking method
+    pub register_states: [RegisterState; 16],
 
     /// Memory operations performed during this cycle
     ///
@@ -49,6 +64,27 @@ impl TraceRow {
             instruction,
             registers,
             bounds,
+            register_states: [RegisterState::Normalized; 16],
+            memory_ops: Vec::new(),
+        }
+    }
+
+    /// Create a new trace row with register states
+    pub fn with_register_states(
+        cycle: u64,
+        pc: u64,
+        instruction: u32,
+        registers: [u64; 16],
+        bounds: [ValueBound; 16],
+        register_states: [RegisterState; 16],
+    ) -> Self {
+        Self {
+            cycle,
+            pc,
+            instruction,
+            registers,
+            bounds,
+            register_states,
             memory_ops: Vec::new(),
         }
     }
@@ -68,6 +104,7 @@ impl TraceRow {
             instruction,
             registers,
             bounds,
+            register_states: [RegisterState::Normalized; 16],
             memory_ops: vec![memory_op],
         }
     }
@@ -87,6 +124,7 @@ impl TraceRow {
             instruction,
             registers,
             bounds,
+            register_states: [RegisterState::Normalized; 16],
             memory_ops,
         }
     }

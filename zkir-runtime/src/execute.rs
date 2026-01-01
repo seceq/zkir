@@ -16,7 +16,9 @@ use crate::error::{RuntimeError, Result};
 use crate::memory::Memory;
 use crate::range_check::RangeCheckTracker;
 use crate::state::{VMState, HaltReason};
-use zkir_spec::{Instruction, Value, Value40, ValueBound};
+use crate::deferred::{DeferredConfig, execute_add_deferred, execute_sub_deferred, execute_addi_deferred};
+use crate::normalization_witness::NormalizationEvent;
+use zkir_spec::{Instruction, Value, Value40, ValueBound, Register, Opcode};
 
 /// Execute a single instruction
 ///
@@ -863,4 +865,139 @@ mod tests {
             RuntimeError::DivisionByZero { .. }
         ));
     }
+}
+
+/// Execute instruction with deferred carry model and normalization at observation points
+///
+/// This function wraps the regular execute() function and adds:
+/// 1. Normalization at observation points (branches, stores, bitwise, MUL, comparisons)
+/// 2. Deferred arithmetic for ADD/SUB/ADDI operations
+/// 3. Normalization witness collection for proof generation
+///
+/// # Parameters
+/// - `inst`: Instruction to execute
+/// - `state`: VM state
+/// - `memory`: Memory subsystem
+/// - `range_checker`: Optional range check tracker
+/// - `deferred_config`: Configuration for deferred model (limb bits, etc.)
+/// - `cycle`: Current cycle number (for witness generation)
+/// - `pc`: Program counter (for witness generation)
+///
+/// # Returns
+/// Vector of normalization events that occurred during this instruction
+pub fn execute_with_deferred(
+    inst: &Instruction,
+    state: &mut VMState,
+    memory: &mut Memory,
+    range_checker: Option<&mut RangeCheckTracker>,
+    deferred_config: Option<&DeferredConfig>,
+    cycle: u64,
+    pc: u64,
+) -> Result<Vec<NormalizationEvent>> {
+    let mut normalization_events = Vec::new();
+
+    let default_config = DeferredConfig::default();
+    let config = deferred_config.unwrap_or(&default_config);
+
+    // Helper macro to normalize rs1 with witness, rs2 without
+    macro_rules! norm_two {
+        ($rs1:expr, $rs2:expr, $opc:expr) => {{
+            if $rs1 != Register::R0 {
+                if let Some(result) = state.normalize_register_for_observation($rs1, config.normalized_bits, config.limb_bits) {
+                    normalization_events.push(NormalizationEvent::observation_point(
+                        cycle, pc, $rs1, &result, config.normalized_bits, config.limb_bits, $opc,
+                    ));
+                }
+            }
+            if $rs2 != Register::R0 {
+                let _ = state.normalize_register($rs2, config.normalized_bits, config.limb_bits);
+            }
+        }};
+    }
+
+    // Helper macro to normalize rs1 with witness
+    macro_rules! norm_one {
+        ($rs1:expr, $opc:expr) => {{
+            if $rs1 != Register::R0 {
+                if let Some(result) = state.normalize_register_for_observation($rs1, config.normalized_bits, config.limb_bits) {
+                    normalization_events.push(NormalizationEvent::observation_point(
+                        cycle, pc, $rs1, &result, config.normalized_bits, config.limb_bits, $opc,
+                    ));
+                }
+            }
+        }};
+    }
+
+    // Normalize observation point source registers before execution
+    // TEMPORARY: Only normalize first source register to work around
+    // architectural limitation (prover supports only one normalization per row)
+    match inst {
+        // Branches
+        Instruction::Beq { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Beq),
+        Instruction::Bne { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Bne),
+        Instruction::Blt { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Blt),
+        Instruction::Bge { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Bge),
+        Instruction::Bltu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Bltu),
+        Instruction::Bgeu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Bgeu),
+
+        // Stores
+        Instruction::Sw { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sw),
+        Instruction::Sh { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sh),
+        Instruction::Sb { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sb),
+
+        // Bitwise R-type
+        Instruction::And { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::And),
+        Instruction::Or { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Or),
+        Instruction::Xor { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Xor),
+        Instruction::Sll { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sll),
+        Instruction::Srl { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Srl),
+        Instruction::Sra { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sra),
+
+        // Bitwise I-type
+        Instruction::Andi { rs1, .. } => norm_one!(*rs1, Opcode::Andi),
+        Instruction::Ori { rs1, .. } => norm_one!(*rs1, Opcode::Ori),
+        Instruction::Xori { rs1, .. } => norm_one!(*rs1, Opcode::Xori),
+        Instruction::Slli { rs1, .. } => norm_one!(*rs1, Opcode::Slli),
+        Instruction::Srli { rs1, .. } => norm_one!(*rs1, Opcode::Srli),
+        Instruction::Srai { rs1, .. } => norm_one!(*rs1, Opcode::Srai),
+
+        // MUL/DIV
+        Instruction::Mul { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Mul),
+        Instruction::Mulh { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Mulh),
+        Instruction::Div { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Div),
+        Instruction::Divu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Divu),
+        Instruction::Rem { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Rem),
+        Instruction::Remu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Remu),
+
+        // Comparisons
+        Instruction::Seq { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Seq),
+        Instruction::Sne { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sne),
+        Instruction::Slt { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Slt),
+        Instruction::Sltu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sltu),
+        Instruction::Sge { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sge),
+        Instruction::Sgeu { rs1, rs2, .. } => norm_two!(*rs1, *rs2, Opcode::Sgeu),
+
+        // All other instructions don't require normalization
+        _ => {}
+    }
+
+    // Execute the instruction
+    // For ADD/SUB/ADDI, use deferred arithmetic
+    match inst {
+        Instruction::Add { rd, rs1, rs2 } => {
+            execute_add_deferred(state, *rd, *rs1, *rs2, config, range_checker);
+        }
+        Instruction::Sub { rd, rs1, rs2 } => {
+            execute_sub_deferred(state, *rd, *rs1, *rs2, config, range_checker);
+        }
+        Instruction::Addi { rd, rs1, imm } => {
+            execute_addi_deferred(state, *rd, *rs1, *imm as u64, config, range_checker);
+        }
+        _ => {
+            // All other instructions use regular execution
+            execute(inst, state, memory, range_checker)?;
+        }
+    }
+
+    Ok(normalization_events)
 }

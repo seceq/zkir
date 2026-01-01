@@ -1,12 +1,14 @@
 //! Virtual Machine for ZKIR v3.4
 
 use crate::error::{RuntimeError, Result};
-use crate::execute::execute;
+use crate::execute::{execute, execute_with_deferred};
 use crate::memory::Memory;
 use crate::range_check::{RangeCheckTracker, RangeCheckWitness};
 use crate::state::{VMState, HaltReason};
 use crate::syscall::{handle_syscall, IOHandler};
-use zkir_spec::{Instruction, Program, FormatMode, MemoryOp, TraceRow};
+use crate::normalization_witness::NormalizationEvent;
+use crate::deferred::DeferredConfig;
+use zkir_spec::{Instruction, Program, MemoryOp, TraceRow};
 
 /// VM configuration
 #[derive(Debug, Clone)]
@@ -27,6 +29,12 @@ pub struct VMConfig {
     /// - Bounds for each register
     /// - Memory operations (automatically collected)
     pub enable_execution_trace: bool,
+
+    /// Enable deferred carry model (30+30 architecture)
+    ///
+    /// When enabled, ADD/SUB/ADDI operations produce accumulated results
+    /// that are normalized before observation points.
+    pub enable_deferred_model: bool,
 }
 
 impl Default for VMConfig {
@@ -36,6 +44,7 @@ impl Default for VMConfig {
             trace: false,
             enable_range_checking: false,
             enable_execution_trace: false,
+            enable_deferred_model: false,
         }
     }
 }
@@ -60,6 +69,12 @@ pub struct ExecutionResult {
     /// This is the single source of truth for all execution state.
     /// Memory operations are embedded in each TraceRow's memory_ops field.
     pub execution_trace: Vec<TraceRow>,
+
+    /// Normalization witnesses (deferred carry model events)
+    ///
+    /// Records all normalization events that occurred during execution.
+    /// These are used by the prover to verify deferred arithmetic operations.
+    pub normalization_witnesses: Vec<NormalizationEvent>,
 }
 
 impl ExecutionResult {
@@ -109,6 +124,9 @@ pub struct VM {
 
     /// Execution trace (if enabled)
     execution_trace: Vec<TraceRow>,
+
+    /// Normalization witnesses (deferred carry model events)
+    normalization_witnesses: Vec<NormalizationEvent>,
 }
 
 impl VM {
@@ -182,6 +200,7 @@ impl VM {
             range_checker,
             range_check_witnesses: Vec::new(),
             execution_trace: Vec::new(),
+            normalization_witnesses: Vec::new(),
         }
     }
 
@@ -215,14 +234,44 @@ impl VM {
             // Capture PRE-state for execution trace (before instruction modifies registers)
             // This is needed for AIR constraints: constraint references rs1/rs2 from LOCAL row
             // and rd from NEXT row, so each row must contain the state BEFORE the instruction.
-            let pre_regs = if self.config.enable_execution_trace {
-                Some((self.state.regs, self.state.bounds))
+            //
+            // IMPORTANT: We capture RAW register values, even with deferred model enabled.
+            // The constraints verify the actual computation that happens (accumulated arithmetic).
+            // Normalizing here would break the constraint verification because the constraints
+            // expect to verify: rd = rs1 + operand2 (in accumulated form).
+            //
+            // CRITICAL: Also capture register_states BEFORE execution, because the converter
+            // needs to know whether each register is Normalized or Accumulated to unpack correctly.
+            let pre_state = if self.config.enable_execution_trace {
+                Some((
+                    self.state.regs,
+                    self.state.bounds,
+                    self.state.register_states.to_spec_states(),
+                ))
             } else {
                 None
             };
 
-            // Execute instruction (pass range checker if enabled)
-            execute(&inst, &mut self.state, &mut self.memory, self.range_checker.as_mut())?;
+            // Execute instruction with optional deferred carry model support
+            let current_cycle = self.state.cycles; // Capture before mutable borrow
+            let normalization_events = if self.config.enable_deferred_model {
+                let deferred_config = DeferredConfig::default();
+                execute_with_deferred(
+                    &inst,
+                    &mut self.state,
+                    &mut self.memory,
+                    self.range_checker.as_mut(),
+                    Some(&deferred_config),
+                    current_cycle,
+                    fetch_pc,
+                )?
+            } else {
+                execute(&inst, &mut self.state, &mut self.memory, self.range_checker.as_mut())?;
+                Vec::new()
+            };
+
+            // Collect normalization witnesses
+            self.normalization_witnesses.extend(normalization_events);
 
             // Handle syscalls
             if matches!(inst, Instruction::Ecall) {
@@ -230,7 +279,7 @@ impl VM {
             }
 
             // Collect execution trace (if enabled)
-            if let Some((regs, bounds)) = pre_regs {
+            if let Some((regs, bounds, register_states)) = pre_state {
                 // Collect data memory operations from this cycle
                 // The instruction fetch is always at PC and should be excluded
                 // We need to find data operations that happened during instruction execution
@@ -254,8 +303,9 @@ impl VM {
                     cycle: self.state.cycles,
                     pc: fetch_pc,  // Use PC where instruction was fetched from
                     instruction: encoded_inst,
-                    registers: regs,   // PRE-state: values before execution
-                    bounds: bounds,    // PRE-state bounds
+                    registers: regs,              // PRE-state: values before execution
+                    bounds: bounds,               // PRE-state bounds
+                    register_states,              // PRE-state: storage formats (captured before execution)
                     memory_ops,
                 };
 
@@ -303,6 +353,7 @@ impl VM {
             halt_reason: self.state.halt_reason.clone().unwrap_or(HaltReason::Ebreak),
             range_check_witnesses: self.range_check_witnesses,
             execution_trace: self.execution_trace,
+            normalization_witnesses: self.normalization_witnesses,
         })
     }
 
@@ -335,6 +386,28 @@ impl VM {
     /// Get memory (for debugging)
     pub fn memory(&self) -> &Memory {
         &self.memory
+    }
+
+    /// Normalize a memory operation value from 30-bit packing to 40-bit representation
+    ///
+    /// Phase 7b: Memory operations may contain values packed with limb_bits=30 (accumulated)
+    /// or already normalized. We normalize them to match the trace registers which are
+    /// always normalized to 40-bit representation.
+    ///
+    /// This mirrors the logic in VMState::get_normalized_regs()
+    fn normalize_mem_value(value: u64, normalized_bits: u8, limb_bits: u8) -> u64 {
+        // Unpack with limb_bits (30) to get accumulated limbs
+        let mask_limb = (1u64 << limb_bits) - 1;
+        let limb0_acc = value & mask_limb;
+        let limb1_acc = (value >> limb_bits) & mask_limb;
+
+        // Reconstruct full 60-bit value
+        let value_60 = limb0_acc | (limb1_acc << limb_bits);
+
+        // Take modulo 2^40 (for 40-bit arithmetic)
+        let value_40 = value_60 & ((1u64 << 40) - 1);
+
+        value_40
     }
 }
 

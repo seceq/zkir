@@ -38,7 +38,7 @@ pub use error::ZkIrError;
 pub use program::{Program, ProgramHeader, FormatMode, MAGIC, VERSION};
 pub use trace::{
     TraceRow, MemoryOp, MemOpType, CryptoWitness, Sha256Witness,
-    Poseidon2Witness, Keccak256Witness,
+    Poseidon2Witness, Keccak256Witness, RegisterState,
 };
 pub use validation::{
     validate, validate_program, ValidationError, ValidationResult, ValidationWarning,

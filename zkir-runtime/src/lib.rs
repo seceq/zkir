@@ -34,6 +34,11 @@ pub mod syscall;
 pub mod vm;
 pub mod range_check;
 pub mod crypto;
+pub mod register_state;
+pub mod observation;
+pub mod normalize;
+pub mod deferred;
+pub mod normalization_witness;
 
 pub use state::{VMState, HaltReason};
 pub use memory::{Memory, MemoryRegion};
@@ -41,6 +46,12 @@ pub use syscall::{IOHandler, handle_syscall};
 pub use vm::{VM, VMConfig, ExecutionResult};
 pub use error::RuntimeError;
 pub use range_check::{RangeCheckTracker, RangeCheckWitness, RangeLookupTable};
+pub use register_state::{RegisterState, RegisterStateTracker};
+pub use observation::{is_observation_point, get_normalize_sources, can_defer_output, InstructionCategory, categorize_instruction};
+pub use normalize::NormalizationResult;
+pub use deferred::{DeferredConfig, execute_add_deferred, execute_sub_deferred, execute_addi_deferred};
+pub use execute::execute_with_deferred;
+pub use normalization_witness::{NormalizationWitness, NormalizationEvent, NormalizationCause};
 
 /// Simple execution helper
 ///
@@ -150,6 +161,7 @@ mod tests {
             halt_reason: HaltReason::Ebreak,
             range_check_witnesses: vec![],
             execution_trace: vec![],
+            normalization_witnesses: vec![],
         };
 
         assert_eq!(result.cycles, 100);
