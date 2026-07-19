@@ -2,12 +2,6 @@
   <img src="zkir.svg" alt="zkir Logo" width="400">
 </p>
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17747636.svg)](https://doi.org/10.5281/zenodo.17747636)
-
-> **Paper:** [ZK IR: A Minimalist Instruction Set Architecture for Efficient Zero-Knowledge Proof Generation](https://zenodo.org/records/17747636)
->
-> Mamone Tarsha-Kurdi, SECEQ Research
-
 A **30-bit native** register-based instruction set and runtime designed for efficient zero-knowledge proof generation with Plonky3.
 
 ## Overview
